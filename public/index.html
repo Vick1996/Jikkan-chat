@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Jikkan</title>
+
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- Japanese-style font -->
+  <link href="https://fonts.googleapis.com/css2?family=Sawarabi+Mincho&display=swap" rel="stylesheet" />
+
+  <style>
+    /* Use Sawarabi Mincho for header and message text */
+    #appName,
+    .bubble,
+    .avatar {
+      font-family: 'Sawarabi Mincho', serif;
+    }
+
+    #splash {
+  background-color: #111827; /* Tailwind’s gray-900, matching your dark logo */
+  transition: opacity 0.5s ease;
+}
+#splash.hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+
+    /* Chat background */
+    #messages {
+      background-image: url('chat-background.jpg');
+      background-size: cover;
+      background-position: center;
+    }
+
+    /* Petal fall animation */
+    @keyframes fall {
+      0%   { transform: translateY(-50px) rotate(0deg); opacity: 1; }
+      90%  { transform: translateY( calc(100vh - 50px) ) rotate(360deg); opacity: 1; }
+      100% { transform: translateY(calc(100vh + 50px)) rotate(360deg); opacity: 0; }
+    }
+
+    .petal {
+      position: absolute;
+      top: -50px;
+      width: 20px;
+      height: 20px;
+      background: radial-gradient(circle at 50% 50%, #f8bbd0 40%, #ec407a);
+      border-radius: 50% 50% 50% 20%;
+      animation-name: fall;
+      animation-timing-function: linear;
+      animation-iteration-count: infinite;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body class="bg-gray-900 text-white flex items-center justify-center h-screen overflow-hidden">
+
+      <!-- Splash Screen -->
+  <div id="splash" class="fixed inset-0 bg-gray-900 flex items-center justify-center z-50">
+    <!-- Enlarged logo -->
+    <img src="logo.png" alt="Jikkan" class="w-64 h-64 animate-pulse" />
+  </div>
+  
+  <!-- Name Entry Modal -->
+  <div id="nameModal" class="fixed inset-0 bg-gray-900 bg-opacity-75 flex items-center justify-center z-20">
+    <div class="bg-white text-gray-900 p-6 rounded-lg w-80">
+      <h2 class="text-2xl font-semibold mb-4 text-center">Enter Your Name</h2>
+      <input id="nameInput" type="text" placeholder="Your name"
+             class="w-full px-4 py-2 border rounded mb-4 focus:outline-none focus:ring-2 focus:ring-pink-500" />
+      <button id="nameBtn" class="w-full bg-pink-600 text-white py-2 rounded hover:bg-pink-700">
+        Join Chat
+      </button>
+    </div>
+  </div>
+
+  <!-- Romantic Popup Modal -->
+  <div id="romanticModal" class="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center hidden z-30">
+    <div id="petalsContainer" class="absolute inset-0 overflow-hidden"></div>
+    <div class="relative bg-white bg-opacity-90 text-gray-900 p-6 rounded-lg w-80 text-center backdrop-blur">
+      <h3 class="text-xl font-medium mb-4">A Special Note</h3>
+      <p id="romanticText" class="mb-6 text-lg"></p>
+      <button id="romanticBtn" class="px-4 py-2 bg-pink-500 text-white rounded hover:bg-pink-600">
+        Let's Chat
+      </button>
+    </div>
+  </div>
+
+  <!-- Main Chat UI -->
+  <div id="chatApp" class="hidden flex flex-col bg-gray-800 rounded-lg w-96 h-[600px] shadow-lg z-10">
+    <div class="px-4 py-2 bg-gray-700 flex items-center justify-between">
+      <!-- English “Jikkan” in Sawarabi Mincho -->
+      <h1 id="appName" class="text-2xl font-bold">Jikkan</h1>
+      <button id="logoutBtn" class="p-2 text-gray-300 hover:text-white" title="Logout">
+        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none"
+             viewBox="0 0 24 24" stroke="currentColor">
+          <!-- Heroicons "exit-left" -->
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                d="M15 19l-7-7 7-7M8 12h13" />
+        </svg>
+      </button>
+    </div>
+
+    <div id="messages" class="flex-1 p-4 overflow-y-auto relative"></div>
+
+    <form id="form" class="flex" novalidate>
+      <input id="input" type="text" placeholder="Type a message..."
+             class="flex-1 px-4 py-2 bg-gray-700 text-white rounded-l-lg focus:outline-none" required />
+      <button type="submit"
+              class="px-4 py-2 bg-green-600 text-white rounded-r-lg hover:bg-green-700 disabled:opacity-50"
+              id="sendBtn" disabled>
+        Send
+      </button>
+    </form>
+  </div>
+
+  <!-- Socket.IO -->
+  <script src="https://cdn.socket.io/4.7.1/socket.io.min.js"></script>
+  <script>
+    const socket = io();
+    let name = '';
+
+    // Elements
+    const nameModal     = document.getElementById('nameModal');
+    const nameInput     = document.getElementById('nameInput');
+    const nameBtn       = document.getElementById('nameBtn');
+    const romanticModal = document.getElementById('romanticModal');
+    const romanticText  = document.getElementById('romanticText');
+    const romanticBtn   = document.getElementById('romanticBtn');
+    const petalsContainer = document.getElementById('petalsContainer');
+    const chatApp       = document.getElementById('chatApp');
+    const messages      = document.getElementById('messages');
+    const form          = document.getElementById('form');
+    const input         = document.getElementById('input');
+    const sendBtn       = document.getElementById('sendBtn');
+    const logoutBtn     = document.getElementById('logoutBtn');
+
+    // Display a text message bubble
+    function displayMessage(sender, msg) {
+      const wrapper = document.createElement('div');
+      wrapper.className = `flex items-start mb-2 gap-3 ${sender === name ? 'justify-end' : 'justify-start'}`;
+      const avatar = document.createElement('div');
+      avatar.className = 'avatar w-8 h-8 rounded-full bg-pink-500 flex items-center justify-center text-white font-bold';
+      avatar.textContent = sender.charAt(0).toUpperCase();
+      const bubble = document.createElement('div');
+      bubble.className = `bubble p-2 rounded-lg max-w-xs break-words ${sender === name ? 'bg-green-600 text-white' : 'bg-gray-600 text-white'}`;
+      bubble.textContent = msg;
+      if (sender === name) wrapper.append(bubble, avatar);
+      else wrapper.append(avatar, bubble);
+      messages.appendChild(wrapper);
+      messages.scrollTop = messages.scrollHeight;
+    }
+
+    // Create a single falling petal
+    function createPetal() {
+      const petal = document.createElement('div');
+      petal.classList.add('petal');
+      petal.style.left = Math.random() * window.innerWidth + 'px';
+      petal.style.animationDuration = (3 + Math.random() * 3) + 's';
+      petal.style.animationDelay = Math.random() * 2 + 's';
+      petalsContainer.appendChild(petal);
+      setTimeout(() => petalsContainer.removeChild(petal), 6000);
+    }
+
+    // Burst petals on login
+    function burstPetals(count = 50) {
+      for (let i = 0; i < count; i++) createPetal();
+      const iv = setInterval(() => createPetal(), 300);
+      setTimeout(() => clearInterval(iv), 5000);
+    }
+
+    // Handle Join Chat button
+    nameBtn.onclick = () => {
+      // Start petals falling nonstop (you can call this in nameBtn.onclick too)
+      const petalInterval = setInterval(createPetal, 300);
+
+      const val = nameInput.value.trim();
+      if (!val) return;
+      name = val;
+      burstPetals();
+      if (['nikya', 'nikita', 'nikku'].includes(name.toLowerCase())) {
+        romanticText.textContent = getRandomRomantic();
+        romanticModal.classList.remove('hidden');
+        romanticBtn.onclick = () => {
+          romanticModal.classList.add('hidden');
+          nameModal.classList.add('hidden');
+          chatApp.classList.remove('hidden');
+        };
+      } else {
+        nameModal.classList.add('hidden');
+        chatApp.classList.remove('hidden');
+      }
+    };
+
+    // Enable/disable Send button
+    input.addEventListener('input', () => {
+      sendBtn.disabled = input.value.trim() === '';
+    });
+
+    // Logout reload
+    logoutBtn.onclick = () => location.reload();
+
+    // Send chat message
+    form.addEventListener('submit', e => {
+      e.preventDefault();
+      const text = input.value.trim();
+      if (!text) return;
+      socket.emit('chat message', { name, msg: text });
+      input.value = '';
+      sendBtn.disabled = true;
+    });
+
+    // Receive chat history
+    socket.on('chat history', history => {
+      history.forEach(m => displayMessage(m.name, m.msg));
+    });
+
+    // Receive new chat messages
+    socket.on('chat message', data => displayMessage(data.name, data.msg));
+
+    // Romantic message pool
+    const romanticPool = [
+      "My heart beats for you, {name}.",
+      "{name}, you light up my world.",
+      "Every thought leads me to you, {name}.",
+      "With you, {name}, life blooms.",
+      "You are my sunshine, {name}.",
+      "My favorite hello is your name, {name}.",
+      "{name}, you make my heart smile.",
+      "In your eyes, {name}, I find home.",
+      "You are my dream come true, {name}.",
+      "Every moment with you is magic, {name}.",
+      "My world is brighter with you, {name}.",
+      "{name}, you are my sweetest melody.",
+      "You are the reason I believe in love, {name}.",
+      "{name}, you've captured my heart.",
+      "Forever feels less without you, {name}."
+    ];
+
+    function getRandomRomantic() {
+      const t = romanticPool[Math.floor(Math.random() * romanticPool.length)];
+      return t.replace("{name}", name);
+    }
+
+    // Request chat history on connect
+    socket.emit('request history');
+
+    // Wait for everything to load, then hide the splash after 2s
+window.addEventListener('load', () => {
+  setTimeout(() => {
+    const splash = document.getElementById('splash');
+    splash.classList.add('hidden');
+    // after fade, remove it from the DOM
+    setTimeout(() => splash.remove(), 500);
+  }, 2000);
+});
+
+  </script>
+</body>
+</html>
