@@ -1,14 +1,40 @@
-# Node.js template
+# 🌸 Jikkan - Real-Time Web Chat App
 
-This is a Node.js project with an HTTP server.
+**Jikkan** (実感) means *“real feeling”* in Japanese—a chat experience that’s simple, elegant, and expressive.
 
-Add your [configuration](https://codesandbox.io/docs/projects/learn/setting-up/tasks) to optimize it for [CodeSandbox](https://codesandbox.io).
+This is a responsive, real-time web-based chat app built using **Node.js**, **Socket.IO**, and **TailwindCSS**, with soft falling petals and a Japanese-inspired UI. Designed for personal use or collaborative chatting with friends.
 
-## How does this work?
+---
 
-We run `yarn start` to start an HTTP server that runs on http://localhost:8080. You can open new or existing devtools with the + button next to the devtool tabs.
+## ✨ Features
 
-## Resources
+- 💬 Real-time 2-way chat using **WebSockets**
+- 🌸 Continuous falling **cherry blossom petals** (only triggered on particular names, ref index.html)
+- 🎌 Elegant Japanese-style typography with **Sawarabi Mincho**
+- 🔒 Name prompt & logout functionality
+- 🖼️ Custom chat background image (`public/chat-background.jpg`)
 
-- [CodeSandbox — Docs](https://codesandbox.io/docs)
-- [CodeSandbox — Discord](https://discord.gg/Ggarp3pX5H)
+---
+
+## 🚀 Live Demo
+
+Access the deployed app at:  
+🔗 [https://jikkan-chat-production.up.railway.app](https://jikkan-chat-production.up.railway.app)
+
+---
+
+## 🛠️ Tech Stack
+
+- **Frontend**: Vanilla JS + TailwindCSS
+- **Backend**: Node.js + Express + Socket.IO
+- **Deployment**: Railway.app
+
+---
+
+## 📦 Installation (Local Dev)
+
+```bash
+git clone https://github.com/yourusername/jikkan.git
+cd jikkan
+npm install
+npm start
