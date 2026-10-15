@@ -121,7 +121,7 @@
     .tick.read { color: var(--ring); }
 
     /* Presence line under the title */
-    #presence:not(:empty)::before { content: ''; display: inline-block; width: 6px; height: 6px; margin-right: 6px; border-radius: 9999px; background: var(--ring); vertical-align: middle; }
+    #presence[data-here]::before { content: ''; display: inline-block; width: 6px; height: 6px; margin-right: 6px; border-radius: 9999px; background: var(--ring); vertical-align: middle; }
 
     #connBanner { background: var(--raised); color: var(--cream); }
     .field[aria-invalid="true"] { border-color: var(--alert); }
@@ -269,6 +269,7 @@
     let authReady = false;    // sign-in form or chat is ready, so the splash may go
     let notificationsOn = false;
     let myLastReadAt = null;  // when I last had the chat open (for the "new messages" marker)
+    let othersDeliveredAt = null; // when the other person's app last received messages (second grey tick)
     let othersReadAt = null;  // when the other person last had the chat open (for read ticks)
     let authMode = 'signin';  // 'signin' | 'newpass'
     const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -321,15 +322,24 @@
       return d.toDateString() === new Date().toDateString() ? t : `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${t}`;
     }
 
+    // "today at 3:45 PM" / "yesterday at 3:45 PM" / "Oct 12, 3:45 PM"
+    function fmtSeen(ts) {
+      const d = new Date(ts), t = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+      const days = Math.round((new Date().setHours(0, 0, 0, 0) - new Date(ts).setHours(0, 0, 0, 0)) / 864e5);
+      return days <= 0 ? `today at ${t}` : days === 1 ? `yesterday at ${t}` : `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${t}`;
+    }
+
     const TICK_SENT = '<svg class="tick" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 13l4 4L19 7"/></svg><span class="sr-only">Sent</span>';
+    const TICK_DELIVERED = '<svg class="tick" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 13l4 4L16 7M9 17l1 1L22 7"/></svg><span class="sr-only">Delivered</span>';
     const TICK_READ = '<svg class="tick read" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 13l4 4L16 7M9 17l1 1L22 7"/></svg><span class="sr-only">Read</span>';
 
-    // Own message: one check once the server has it, two once the other person has had the chat open since.
+    // Own message: one check = saved on the server, two grey = reached her app, two pink = she has had the chat open since.
     function renderTick(wrapper) {
       const tick = wrapper.querySelector('.tick-slot');
       if (!tick || !wrapper.dataset.ts) return;
       const read = othersReadAt && new Date(wrapper.dataset.ts) <= new Date(othersReadAt);
-      tick.innerHTML = read ? TICK_READ : TICK_SENT;
+      const delivered = othersDeliveredAt && new Date(wrapper.dataset.ts) <= new Date(othersDeliveredAt);
+      tick.innerHTML = read ? TICK_READ : (delivered ? TICK_DELIVERED : TICK_SENT);
     }
     function applyReceipts() { messages.querySelectorAll('[data-own][data-ts]').forEach(renderTick); }
 
@@ -366,6 +376,16 @@
       clearTimeout(readTimer);
       readTimer = setTimeout(() => socket.emit('read'), 300);
     }
+
+    // Tell the server this app has received the messages on screen (even if the chat is not in view)
+    let deliveredTimer;
+    function markDelivered() {
+      if (!socket?.connected) return;
+      clearTimeout(deliveredTimer);
+      deliveredTimer = setTimeout(() => socket.emit('delivered'), 300);
+    }
+    // Tell the server whether the chat is in front of me (drives "here" / last seen on the other phone)
+    function reportVisible() { if (socket?.connected) socket.emit('visible', !document.hidden); }
 
     // Display a text message bubble. Tap the bubble to show or hide its time. Own messages get a delivery tick
     // and, while sending, a status line (sending / not sent).
@@ -669,6 +689,7 @@
     let unread = 0;
     const swReady = 'serviceWorker' in navigator ? navigator.serviceWorker.register('/sw.js').then(() => navigator.serviceWorker.ready) : Promise.resolve();
     document.addEventListener('visibilitychange', () => {
+      reportVisible();
       if (!document.hidden) { unread = 0; document.title = baseTitle; markRead(); }
     });
     addEventListener('focus', markRead);
@@ -748,6 +769,8 @@
         name = me.name;
         myLastReadAt = me.lastReadAt;
         othersReadAt = me.othersReadAt;
+        othersDeliveredAt = me.othersDeliveredAt;
+        reportVisible();
         notificationsOn = me.notificationsEnabled;
         renderBell();
         if (notificationsOn) ensurePush();
@@ -779,23 +802,29 @@
         });
         pending.forEach(p => messages.appendChild(p));
         scrollToFresh();
+        markDelivered();
         markRead();
       });
 
       // System notifications come from Web Push (service worker); here only the unread count in the tab title
       socket.on('chat message', data => {
         displayMessage(data.name, data.msg, data.ts);
+        markDelivered();
         if (document.hidden) { unread++; document.title = `(${unread}) ${baseTitle}`; }
         else markRead();
       });
 
       // The other person had the chat open: everything I sent up to then is read
       socket.on('read', r => { othersReadAt = r.ts; applyReceipts(); });
+      socket.on('delivered', r => { othersDeliveredAt = r.ts; applyReceipts(); });
 
       // Who is here right now
       socket.on('presence', p => {
         const others = p.online.filter(n => n !== name);
-        presence.textContent = others.length ? `${others.join(' & ')} ${others.length > 1 ? 'are' : 'is'} here` : '';
+        const away = Object.keys(p.lastSeen || {}).filter(n => n !== name);
+        presence.toggleAttribute('data-here', others.length > 0);
+        presence.textContent = others.length ? `${others.join(' & ')} ${others.length > 1 ? 'are' : 'is'} here`
+          : (away.length ? `${away[0]} last seen ${fmtSeen(p.lastSeen[away[0]])}` : '');
       });
     }
 

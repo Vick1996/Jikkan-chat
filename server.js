@@ -75,10 +75,18 @@ async function pushToOthers({ userId, roomId, name }, body) {
   }
 }
 
-// Who is connected right now in a Room (display names, de-duplicated across a person's devices)
-async function broadcastPresence(roomId) {
+// Who is here right now in a Room: a Member is here while at least one of their devices has the chat visible
+// (an app left open in a background tab does not count). Also sends everyone's last-seen time.
+// justLeft = userId whose last visible device just went away: stamp their last_seen_at first.
+async function broadcastPresence(roomId, justLeft) {
   const socks = await io.in(roomId).fetchSockets();
-  io.to(roomId).emit('presence', { online: [...new Set(socks.map(s => s.data.name))] });
+  const online = [...new Set(socks.filter(s => s.data.visible).map(s => s.data.name))];
+  if (justLeft && !socks.some(s => s.data.visible && s.data.userId === justLeft)) {
+    await db.from('members').update({ last_seen_at: new Date().toISOString() }).eq('room_id', roomId).eq('user_id', justLeft);
+  }
+  const { data: members } = await db.from('members').select('display_name, last_seen_at').eq('room_id', roomId);
+  const lastSeen = Object.fromEntries((members || []).filter(m => m.last_seen_at).map(m => [m.display_name, m.last_seen_at]));
+  io.to(roomId).emit('presence', { online, lastSeen });
 }
 
 io.on('connection', socket => {
@@ -103,10 +111,25 @@ io.on('connection', socket => {
   });
 
   // "I have the chat open and can see it": drives the other Member's read receipts and my own unread marker.
+  // Reading implies delivered.
   socket.on('read', async () => {
     const ts = new Date().toISOString();
-    const { error } = await db.from('members').update({ last_read_at: ts }).eq('room_id', roomId).eq('user_id', userId);
-    if (!error) socket.to(roomId).emit('read', { name, ts });
+    const { error } = await db.from('members').update({ last_read_at: ts, delivered_at: ts }).eq('room_id', roomId).eq('user_id', userId);
+    if (!error) { socket.to(roomId).emit('read', { name, ts }); socket.to(roomId).emit('delivered', { name, ts }); }
+  });
+
+  // "My app has received the messages" (open or not in view): drives the second grey tick on the sender's side.
+  socket.on('delivered', async () => {
+    const ts = new Date().toISOString();
+    const { error } = await db.from('members').update({ delivered_at: ts }).eq('room_id', roomId).eq('user_id', userId);
+    if (!error) socket.to(roomId).emit('delivered', { name, ts });
+  });
+
+  // The app says whether the chat is in view (tab/app in front). Drives "here" and last seen.
+  socket.on('visible', v => {
+    const was = !!socket.data.visible;
+    socket.data.visible = !!v;
+    if (was !== socket.data.visible) broadcastPresence(roomId, was ? userId : null);
   });
 
   // Notifications: one switch per account (all devices); each device registers its own push subscription.
@@ -134,7 +157,7 @@ io.on('connection', socket => {
     ack?.({ ok: true });
   });
 
-  socket.on('disconnect', () => broadcastPresence(roomId));
+  socket.on('disconnect', () => broadcastPresence(roomId, socket.data.visible ? userId : null));
 
   // Initial payload: who I am, my settings and read state, then history, then presence
   (async () => {
@@ -142,7 +165,7 @@ io.on('connection', socket => {
       notificationsEnabled(userId),
       db.from('messages').select('id, body, created_at, sender_id').eq('room_id', roomId)
         .order('created_at', { ascending: false }).limit(MAX_HISTORY),
-      db.from('members').select('user_id, display_name, last_read_at').eq('room_id', roomId),
+      db.from('members').select('user_id, display_name, last_read_at, delivered_at').eq('room_id', roomId),
       db.from('account_settings').select('wallpaper').eq('user_id', userId).maybeSingle()
     ]);
     const names = Object.fromEntries((members || []).map(m => [m.user_id, m.display_name]));
@@ -151,7 +174,10 @@ io.on('connection', socket => {
     const othersReadAt = (members || []).filter(m => m.user_id !== userId && m.last_read_at)
       .map(m => m.last_read_at).sort().pop() || null;
 
-    socket.emit('me', { name, aliases, notificationsEnabled: settingOn, lastReadAt: mine?.last_read_at || null, othersReadAt });
+    const othersDeliveredAt = (members || []).filter(m => m.user_id !== userId && m.delivered_at)
+      .map(m => m.delivered_at).sort().pop() || null;
+
+    socket.emit('me', { name, aliases, notificationsEnabled: settingOn, lastReadAt: mine?.last_read_at || null, othersReadAt, othersDeliveredAt });
     socket.emit('wallpaper', room?.wallpaper ?? null);
     socket.emit('chat history', (rows || []).reverse().map(r => (
       { id: r.id, name: names[r.sender_id] || 'Unknown', msg: r.body, ts: r.created_at }
