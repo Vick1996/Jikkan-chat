@@ -185,7 +185,7 @@
   <!-- Socket.IO -->
   <script src="https://cdn.socket.io/4.7.1/socket.io.min.js"></script>
   <script>
-    let socket, supabase, vapidKey;
+    let socket, sb, vapidKey;
     let name = '';
     let opened = false;       // chat screen shown
     let authReady = false;    // sign-in form or chat is ready, so the splash may go
@@ -311,7 +311,7 @@
       try {
         if (authMode === 'newpass') {
           if (passwordInput.value.length < 8) return showAuth('newpass', 'Use at least 8 characters.');
-          const { error } = await supabase.auth.updateUser({ password: passwordInput.value });
+          const { error } = await sb.auth.updateUser({ password: passwordInput.value });
           if (error) return showAuth('newpass', error.message);
           history.replaceState(null, '', location.pathname);
           passwordInput.value = '';
@@ -319,7 +319,7 @@
         }
         const email = emailInput.value.trim();
         if (!email || !passwordInput.value) return showAuth('signin', 'Enter your email and password.');
-        const { error } = await supabase.auth.signInWithPassword({ email, password: passwordInput.value });
+        const { error } = await sb.auth.signInWithPassword({ email, password: passwordInput.value });
         if (error) return showAuth('signin', 'Email or password is wrong.');
         passwordInput.value = '';
         // Asked here because it needs a tap; the answer decides whether the bell can turn on
@@ -333,7 +333,7 @@
     forgotBtn.addEventListener('click', async () => {
       const email = emailInput.value.trim();
       if (!email) return showAuth('signin', 'Type your email first, then tap Forgot password.');
-      const { error } = await supabase.auth.resetPasswordForEmail(email, { redirectTo: location.origin });
+      const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: location.origin });
       showAuth('signin', error ? 'Could not send the email. Try again in a minute.' : 'Check your email for a reset link.', !!error);
     });
 
@@ -344,7 +344,7 @@
         const reg = await navigator.serviceWorker?.getRegistration();
         (await reg?.pushManager.getSubscription())?.unsubscribe();
       } catch {}
-      await supabase.auth.signOut();
+      await sb.auth.signOut();
       location.reload();
     };
 
@@ -443,14 +443,14 @@
 
     function wireSocket() {
       // auth as a function: every (re)connect sends a fresh token, so an expired one never strands the chat
-      socket = io({ auth: cb => supabase.auth.getSession().then(({ data }) => cb({ token: data.session?.access_token })) });
+      socket = io({ auth: cb => sb.auth.getSession().then(({ data }) => cb({ token: data.session?.access_token })) });
 
       socket.on('connect', () => {
         connBanner.classList.add('hidden');
       });
       socket.on('disconnect', () => showBanner('Offline. Messages will send when you are back.'));
       socket.on('connect_error', err => {
-        if (err.message === 'unauthorized') return supabase.auth.signOut().then(() => showAuth('signin', 'Please sign in again.'));
+        if (err.message === 'unauthorized') return sb.auth.signOut().then(() => showAuth('signin', 'Please sign in again.'));
         if (err.message === 'forbidden') return showAuth('signin', 'This account is not a member of the chat.');
         showBanner('Can’t reach the server. Retrying…');
       });
@@ -540,13 +540,13 @@
     (async () => {
       const cfg = await (await fetch('/config')).json();
       vapidKey = cfg.vapidPublicKey;
-      supabase = window.supabase.createClient(cfg.supabaseUrl, cfg.supabaseKey);
+      sb = window.supabase.createClient(cfg.supabaseUrl, cfg.supabaseKey);
       // A password-reset email link lands here with type=recovery in the URL
       if (location.hash.includes('type=recovery')) {
-        supabase.auth.onAuthStateChange(ev => { if (ev === 'PASSWORD_RECOVERY') showAuth('newpass', '', false); });
+        sb.auth.onAuthStateChange(ev => { if (ev === 'PASSWORD_RECOVERY') showAuth('newpass', '', false); });
         return;
       }
-      const { data: { session } } = await supabase.auth.getSession();
+      const { data: { session } } = await sb.auth.getSession();
       if (session) startSession();
       else showAuth('signin', '', false);
     })();
