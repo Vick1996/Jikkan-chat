@@ -2,7 +2,8 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#14100f" />
   <title>Jikkan</title>
 
   <!-- Tailwind CSS -->
@@ -12,6 +13,20 @@
   <link href="https://fonts.googleapis.com/css2?family=Sawarabi+Mincho&display=swap" rel="stylesheet" />
 
   <style>
+    /* Night palette, taken from the logo: warm ink, cream, petal rose. All text pairs are >= 6:1. */
+    :root {
+      --ink: #14100f;
+      --surface: #1f1918;
+      --raised: #2d2321;
+      --cream: #f1e6d6;
+      --muted: #b9a99b;
+      --rose: #8c3553;
+      --rose-hover: #7a2c47;
+      --theirs: #3a2e2c;
+      --ring: #f0a5bb;
+      --alert: #f2a7a0;
+    }
+
     /* Use Sawarabi Mincho for header and message text */
     #appName,
     .bubble,
@@ -19,22 +34,50 @@
       font-family: 'Sawarabi Mincho', serif;
     }
 
-    #splash {
-  background-color: #111827; /* Tailwind’s gray-900, matching your dark logo */
-  transition: opacity 0.5s ease;
-}
-#splash.hidden {
-  opacity: 0;
-  pointer-events: none;
-}
+    body {
+      background: var(--ink);
+      color: var(--cream);
+      /* --app-h follows the visual viewport, so the on-screen keyboard never covers the input */
+      height: var(--app-h, 100dvh);
+    }
 
+    :focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+    ::placeholder { color: var(--muted); opacity: 1; }
+    ::selection { background: var(--rose); color: var(--cream); }
 
-    /* Chat background */
+    #splash { background-color: var(--ink); transition: opacity 0.5s ease; }
+    #splash.hidden { opacity: 0; pointer-events: none; }
+
+    .card { background: var(--surface); color: var(--cream); }
+    .btn-rose { background: var(--rose); color: var(--cream); min-height: 44px; }
+    .btn-rose:hover { background: var(--rose-hover); }
+    .btn-rose:disabled { opacity: 0.45; }
+    .field { background: var(--raised); color: var(--cream); border: 1px solid #4a3b38; font-size: 16px; /* 16px stops iOS zoom-on-focus */ }
+
+    /* Chat shell: full screen on phones, a centred card from tablet up */
+    #chatApp { width: 100%; max-width: 28rem; height: 100%; background: var(--surface); }
+    #chatApp:not(.hidden) { display: flex; }
+    @media (min-width: 640px) {
+      body { padding: 1rem; }
+      #chatApp { height: min(100%, 44rem); border-radius: 1rem; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5); overflow: hidden; }
+    }
+
+    /* Dark scrim keeps bubbles legible over the photo */
     #messages {
-      background-image: url('chat-background.jpg');
+      background-image: linear-gradient(rgba(20, 16, 15, 0.78), rgba(20, 16, 15, 0.78)), url('chat-background.jpg');
       background-size: cover;
       background-position: center;
     }
+    .mine   { background: var(--rose);   color: var(--cream); }
+    .theirs { background: var(--theirs); color: var(--cream); }
+    .avatar.mine-av   { background: var(--rose); }
+    .avatar.theirs-av { background: var(--raised); }
+
+    .icon-btn { min-width: 44px; min-height: 44px; color: var(--muted); }
+    .icon-btn:hover { color: var(--cream); }
+
+    #connBanner { background: var(--raised); color: var(--cream); }
+    .retry { color: var(--alert); min-height: 44px; text-decoration: underline; text-underline-offset: 3px; }
 
     /* Petal fall animation */
     @keyframes fall {
@@ -55,78 +98,85 @@
       animation-iteration-count: infinite;
       pointer-events: none;
     }
+
+    @media (prefers-reduced-motion: reduce) {
+      .petal { display: none; }
+      .animate-pulse { animation: none; }
+      #splash { transition: none; }
+    }
   </style>
 </head>
-<body class="bg-gray-900 text-white flex items-center justify-center h-screen overflow-hidden">
+<body class="flex items-center justify-center overflow-hidden">
 
-      <!-- Splash Screen -->
-  <div id="splash" class="fixed inset-0 bg-gray-900 flex items-center justify-center z-50">
-    <!-- Enlarged logo -->
+  <!-- Splash Screen: stays until the server answers (a sleeping server can take ~1 min) -->
+  <div id="splash" class="fixed inset-0 flex flex-col items-center justify-center gap-4 z-50">
     <img src="logo.png" alt="Jikkan" class="w-64 h-64 animate-pulse" />
+    <p id="splashNote" role="status" class="hidden text-center px-6" style="color: var(--muted)">
+      Waking up&hellip; this can take a minute.
+    </p>
   </div>
-  
+
   <!-- Name Entry Modal -->
-  <div id="nameModal" class="fixed inset-0 bg-gray-900 bg-opacity-75 flex items-center justify-center z-20">
-    <div class="bg-white text-gray-900 p-6 rounded-lg w-80">
-      <h2 class="text-2xl font-semibold mb-4 text-center">Enter Your Name</h2>
-      <input id="nameInput" type="text" placeholder="Your name"
-             class="w-full px-4 py-2 border rounded mb-4 focus:outline-none focus:ring-2 focus:ring-pink-500" />
-      <button id="nameBtn" class="w-full bg-pink-600 text-white py-2 rounded hover:bg-pink-700">
-        Join Chat
-      </button>
-    </div>
+  <div id="nameModal" role="dialog" aria-modal="true" aria-labelledby="nameLabel"
+       class="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-20 p-4">
+    <form id="nameForm" class="card p-6 rounded-2xl w-full max-w-xs" novalidate>
+      <label id="nameLabel" for="nameInput" class="block text-2xl font-semibold mb-4 text-center">Enter Your Name</label>
+      <input id="nameInput" type="text" autocomplete="given-name" aria-describedby="nameError"
+             class="field w-full px-4 py-2 min-h-[44px] rounded-lg mb-2" />
+      <p id="nameError" role="alert" class="text-sm mb-2 min-h-[1.25rem]" style="color: var(--alert)"></p>
+      <button id="nameBtn" type="submit" class="btn-rose w-full px-4 py-2 rounded-lg">Join Chat</button>
+    </form>
   </div>
 
   <!-- Romantic Popup Modal -->
-  <div id="romanticModal" class="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center hidden z-30">
-    <div id="petalsContainer" class="absolute inset-0 overflow-hidden"></div>
-    <div class="relative bg-white bg-opacity-90 text-gray-900 p-6 rounded-lg w-80 text-center backdrop-blur">
-      <h3 class="text-xl font-medium mb-4">A Special Note</h3>
+  <div id="romanticModal" role="dialog" aria-modal="true" aria-labelledby="romanticTitle"
+       class="fixed inset-0 bg-black bg-opacity-80 flex items-center justify-center hidden z-30 p-4">
+    <div id="petalsContainer" class="absolute inset-0 overflow-hidden" aria-hidden="true"></div>
+    <div class="card relative p-6 rounded-2xl w-full max-w-xs text-center">
+      <h3 id="romanticTitle" class="text-xl font-medium mb-4">A Special Note</h3>
       <p id="romanticText" class="mb-6 text-lg"></p>
-      <button id="romanticBtn" class="px-4 py-2 bg-pink-500 text-white rounded hover:bg-pink-600">
-        Let's Chat
-      </button>
+      <button id="romanticBtn" class="btn-rose px-4 py-2 rounded-lg">Let's Chat</button>
     </div>
   </div>
 
   <!-- Main Chat UI -->
-  <div id="chatApp" class="hidden flex flex-col bg-gray-800 rounded-lg w-96 h-[600px] shadow-lg z-10">
-    <div class="px-4 py-2 bg-gray-700 flex items-center justify-between">
-      <!-- English “Jikkan” in Sawarabi Mincho -->
+  <main id="chatApp" class="hidden flex-col">
+    <header class="px-4 py-1 flex items-center justify-between" style="background: var(--raised)">
       <h1 id="appName" class="text-2xl font-bold">Jikkan</h1>
-      <button id="logoutBtn" class="p-2 text-gray-300 hover:text-white" title="Logout">
-        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none"
+      <button id="logoutBtn" class="icon-btn flex items-center justify-center rounded-lg" title="Leave chat" aria-label="Leave chat">
+        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" aria-hidden="true"
              viewBox="0 0 24 24" stroke="currentColor">
-          <!-- Heroicons "exit-left" -->
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                 d="M15 19l-7-7 7-7M8 12h13" />
         </svg>
       </button>
-    </div>
+    </header>
 
-    <div id="messages" class="flex-1 p-4 overflow-y-auto relative"></div>
+    <!-- Connection status: only visible when something is wrong -->
+    <div id="connBanner" role="status" class="hidden px-4 py-2 text-sm text-center"></div>
 
-    <form id="form" class="flex" novalidate>
-      <input id="input" type="text" placeholder="Type a message..."
-             class="flex-1 px-4 py-2 bg-gray-700 text-white rounded-l-lg focus:outline-none" required />
-      <button type="submit"
-              class="px-4 py-2 bg-green-600 text-white rounded-r-lg hover:bg-green-700 disabled:opacity-50"
-              id="sendBtn" disabled>
-        Send
-      </button>
+    <div id="messages" role="log" aria-live="polite" aria-label="Conversation"
+         class="flex-1 p-4 overflow-y-auto relative"></div>
+
+    <form id="form" class="flex gap-2 p-2" style="background: var(--raised); padding-bottom: max(0.5rem, env(safe-area-inset-bottom))" novalidate>
+      <input id="input" type="text" placeholder="Type a message..." aria-label="Message" autocomplete="off"
+             class="field flex-1 px-4 py-2 min-h-[44px] rounded-lg" required />
+      <button type="submit" id="sendBtn" class="btn-rose px-5 py-2 rounded-lg" disabled>Send</button>
     </form>
-  </div>
+  </main>
 
   <!-- Socket.IO -->
   <script src="https://cdn.socket.io/4.7.1/socket.io.min.js"></script>
   <script>
     const socket = io();
     let name = '';
+    const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 
     // Elements
     const nameModal     = document.getElementById('nameModal');
+    const nameForm      = document.getElementById('nameForm');
     const nameInput     = document.getElementById('nameInput');
-    const nameBtn       = document.getElementById('nameBtn');
+    const nameError     = document.getElementById('nameError');
     const romanticModal = document.getElementById('romanticModal');
     const romanticText  = document.getElementById('romanticText');
     const romanticBtn   = document.getElementById('romanticBtn');
@@ -137,34 +187,56 @@
     const input         = document.getElementById('input');
     const sendBtn       = document.getElementById('sendBtn');
     const logoutBtn     = document.getElementById('logoutBtn');
+    const connBanner    = document.getElementById('connBanner');
+    const splash        = document.getElementById('splash');
+    const splashNote    = document.getElementById('splashNote');
 
-    // Display a text message bubble
-    function displayMessage(sender, msg, pending = false) {
+    // Track the visual viewport so the on-screen keyboard never hides the input
+    const vv = window.visualViewport;
+    function fitViewport() {
+      document.documentElement.style.setProperty('--app-h', (vv ? vv.height : innerHeight) + 'px');
+      window.scrollTo(0, 0);
+    }
+    fitViewport();
+    vv?.addEventListener('resize', fitViewport);
+    addEventListener('resize', fitViewport);
+
+    // Display a text message bubble. Own messages get a status line (sending / not sent).
+    function displayMessage(sender, msg) {
+      const mine = sender === name;
       const wrapper = document.createElement('div');
-      wrapper.className = `flex items-start mb-2 gap-3 ${sender === name ? 'justify-end' : 'justify-start'}`;
+      wrapper.className = `flex items-end mb-3 gap-2 ${mine ? 'justify-end' : 'justify-start'}`;
       const avatar = document.createElement('div');
-      avatar.className = 'avatar w-8 h-8 rounded-full bg-pink-500 flex items-center justify-center text-white font-bold';
+      avatar.className = `avatar w-8 h-8 shrink-0 rounded-full flex items-center justify-center font-bold ${mine ? 'mine-av' : 'theirs-av'}`;
+      avatar.setAttribute('aria-hidden', 'true');
       avatar.textContent = sender.charAt(0).toUpperCase();
+      const col = document.createElement('div');
+      col.className = `flex flex-col ${mine ? 'items-end' : 'items-start'}`;
+      col.style.maxWidth = '78%';
+      const who = document.createElement('span');
+      who.className = 'sr-only';
+      who.textContent = `${sender}: `;
       const bubble = document.createElement('div');
-      bubble.className = `bubble p-2 rounded-lg max-w-xs break-words ${sender === name ? 'bg-green-600 text-white' : 'bg-gray-600 text-white'}`;
+      bubble.className = `bubble px-3 py-2 rounded-2xl break-words ${mine ? 'mine' : 'theirs'}`;
       bubble.textContent = msg;
-      if (sender === name) wrapper.append(bubble, avatar);
-      else wrapper.append(avatar, bubble);
-      if (pending) wrapper.classList.add('opacity-50');
+      col.append(who, bubble);
+      if (mine) wrapper.append(col, avatar);
+      else wrapper.append(avatar, col);
       messages.appendChild(wrapper);
       messages.scrollTop = messages.scrollHeight;
-      return wrapper;
+      return col;
     }
 
     // Create a single falling petal
     function createPetal() {
+      if (reduceMotion) return;
       const petal = document.createElement('div');
       petal.classList.add('petal');
       petal.style.left = Math.random() * window.innerWidth + 'px';
       petal.style.animationDuration = (3 + Math.random() * 3) + 's';
       petal.style.animationDelay = Math.random() * 2 + 's';
       petalsContainer.appendChild(petal);
-      setTimeout(() => petalsContainer.removeChild(petal), 6000);
+      setTimeout(() => petal.remove(), 6000);
     }
 
     // Burst petals on login
@@ -174,62 +246,91 @@
       setTimeout(() => clearInterval(iv), 5000);
     }
 
-    // Handle Join Chat button
-    nameBtn.onclick = () => {
-      // Start petals falling nonstop (you can call this in nameBtn.onclick too)
-      const petalInterval = setInterval(createPetal, 300);
+    function openChat() {
+      romanticModal.classList.add('hidden');
+      nameModal.classList.add('hidden');
+      chatApp.classList.remove('hidden');
+      input.focus();
+      if (!socket.connected) showBanner('Connecting…');
+    }
 
+    // Handle Join Chat (button or Enter)
+    nameForm.addEventListener('submit', e => {
+      e.preventDefault();
       const val = nameInput.value.trim();
-      if (!val) return;
+      if (!val) {
+        nameError.textContent = 'Please tell me who is here.';
+        nameInput.focus();
+        return;
+      }
+      nameError.textContent = '';
       name = val;
       joinRoom();
       if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission();
-      burstPetals();
       if (['nikya', 'nikita', 'nikku'].includes(name.toLowerCase())) {
+        burstPetals();
         romanticText.textContent = getRandomRomantic();
         romanticModal.classList.remove('hidden');
-        romanticBtn.onclick = () => {
-          romanticModal.classList.add('hidden');
-          nameModal.classList.add('hidden');
-          chatApp.classList.remove('hidden');
-        };
+        romanticBtn.onclick = openChat;
+        romanticBtn.focus();
       } else {
-        nameModal.classList.add('hidden');
-        chatApp.classList.remove('hidden');
+        openChat();
       }
-    };
+    });
+    nameInput.focus();
 
     // Enable/disable Send button
     input.addEventListener('input', () => {
       sendBtn.disabled = input.value.trim() === '';
     });
 
-    // Logout reload
+    // Leave = reload
     logoutBtn.onclick = () => location.reload();
 
-    // Send chat message
+    // Send a message. Shows "Sending..." only if the ack is slow; on failure keeps the text and offers retry.
+    function deliver(col, text, id) {
+      let status = col.querySelector('.status');
+      if (status) status.remove();
+      status = document.createElement('div');
+      status.className = 'status text-xs mt-1 min-h-[1rem]';
+      status.style.color = 'var(--muted)';
+      col.appendChild(status);
+      col.parentElement.dataset.pending = '1';
+      const slow = setTimeout(() => { status.textContent = 'Sending…'; }, 800);
+      // socket.io buffers the emit while offline and sends it on reconnect; timeout drops it from the buffer
+      socket.timeout(10000).emit('chat message', { id, name, msg: text }, (err, res) => {
+        clearTimeout(slow);
+        if (!err && res?.ok) { status.remove(); delete col.parentElement.dataset.pending; return; }
+        status.innerHTML = '';
+        const retry = document.createElement('button');
+        retry.type = 'button';
+        retry.className = 'retry text-sm';
+        retry.textContent = 'Not sent. Tap to retry';
+        retry.onclick = () => deliver(col, text, id);
+        status.appendChild(retry);
+      });
+    }
+
     form.addEventListener('submit', e => {
       e.preventDefault();
       const text = input.value.trim();
       if (!text) return;
-      const id = crypto.randomUUID();
-      const el = displayMessage(name, text, true);
-      // Buffered by socket.io while offline and sent on reconnect; 50% opacity until the server acks
-      socket.timeout(10000).emit('chat message', { id, name, msg: text }, (err, res) => {
-        if (!err && res?.ok) el.classList.remove('opacity-50');
-        else el.querySelector('.bubble').textContent = '⚠ ' + text;
-      });
+      deliver(displayMessage(name, text), text, crypto.randomUUID());
       input.value = '';
       sendBtn.disabled = true;
+      input.focus();
     });
 
     // Receive chat history
+    // Re-render from history (also runs after reconnects), but keep bubbles still waiting for their ack
     socket.on('chat history', history => {
+      const pending = [...messages.querySelectorAll('[data-pending]')];
       messages.innerHTML = '';
       history.forEach(m => displayMessage(m.name, m.msg));
+      pending.forEach(p => messages.appendChild(p));
+      messages.scrollTop = messages.scrollHeight;
     });
 
-    // Receive new chat messages
     // Notify when the tab is in the background: system notification + unread count in the title
     const baseTitle = document.title;
     let unread = 0;
@@ -272,20 +373,37 @@
       return t.replace("{name}", name);
     }
 
+    // Connection status banner
+    function showBanner(text) {
+      if (chatApp.classList.contains('hidden')) return;
+      connBanner.textContent = text;
+      connBanner.classList.remove('hidden');
+    }
+    socket.on('disconnect', () => showBanner('Offline. Messages will send when you are back.'));
+    socket.on('connect_error', () => showBanner('Can’t reach the server. Retrying…'));
+
     // Join the private room (after name entry and after every reconnect)
     function joinRoom() { if (name) socket.emit('join'); }
-    socket.on('connect', joinRoom);
+    socket.on('connect', () => {
+      joinRoom();
+      connBanner.classList.add('hidden');
+      hideSplash();
+    });
 
-    // Wait for everything to load, then hide the splash after 2s
-window.addEventListener('load', () => {
-  setTimeout(() => {
-    const splash = document.getElementById('splash');
-    splash.classList.add('hidden');
-    // after fade, remove it from the DOM
-    setTimeout(() => splash.remove(), 500);
-  }, 2000);
-});
-
+    // Splash: at least 2s, and only once the server has answered. After 4s say why it's slow;
+    // after 12s give up waiting so the banner can explain.
+    let minShown = false, splashGone = false;
+    function hideSplash(force) {
+      if (splashGone || (!force && !(minShown && socket.connected))) return;
+      splashGone = true;
+      splash.classList.add('hidden');
+      setTimeout(() => splash.remove(), 500);
+    }
+    addEventListener('load', () => {
+      setTimeout(() => { minShown = true; hideSplash(); }, 2000);
+      setTimeout(() => { if (!splashGone) splashNote.classList.remove('hidden'); }, 4000);
+      setTimeout(() => hideSplash(true), 12000);
+    });
   </script>
 </body>
 </html>
