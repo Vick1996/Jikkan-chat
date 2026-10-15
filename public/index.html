@@ -531,11 +531,10 @@
       splash.classList.add('hidden');
       setTimeout(() => splash.remove(), 500);
     }
-    addEventListener('load', () => {
-      setTimeout(() => { minShown = true; hideSplash(); }, 2000);
-      setTimeout(() => { if (!splashGone) splashNote.classList.remove('hidden'); }, 4000);
-      setTimeout(() => { if (!splashGone) { if (!authReady) openChat(); hideSplash(true); } }, 12000);
-    });
+    // Started right away, not on window 'load': the 1.8 MB logo would otherwise delay everything by its download time.
+    setTimeout(() => { minShown = true; hideSplash(); }, 2000);
+    setTimeout(() => { if (!splashGone) splashNote.classList.remove('hidden'); }, 4000);
+    setTimeout(() => { if (!splashGone) { if (!authReady) openChat(); hideSplash(true); } }, 12000);
 
     // ---------- Boot ----------
     (async () => {
