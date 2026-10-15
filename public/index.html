@@ -3,11 +3,11 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-  <meta name="theme-color" content="#14100f" />
+  <meta name="theme-color" content="#fdeef3" />
   <script>
-    // Apply the saved (or system) theme before first paint so there is no flash of the wrong one
+    // Apply the saved theme (light pink unless the user chose dark) before first paint so there is no flash of the wrong one
     try {
-      const t = localStorage.getItem('jk-theme') || (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+      const t = localStorage.getItem('jk-theme') || 'light';
       document.documentElement.dataset.theme = t;
     } catch { document.documentElement.dataset.theme = 'dark'; }
   </script>
@@ -22,36 +22,36 @@
   <style>
     /* Night palette, taken from the logo: warm ink, cream, petal rose. All text pairs are >= 6:1. */
     :root, :root[data-theme="dark"] {
-      --ink: #14100f;
-      --surface: #1f1918;
-      --raised: #2d2321;
-      --cream: #f1e6d6;
-      --muted: #b9a99b;
+      --ink: #170f13;
+      --surface: #21161b;
+      --raised: #2f2027;
+      --cream: #f6e6ec;
+      --muted: #c4a9b4;
       --rose: #8c3553;
       --rose-hover: #7a2c47;
-      --theirs: #3a2e2c;
+      --theirs: #3d2a33;
       --ring: #f0a5bb;
       --alert: #f2a7a0;
-      --on-rose: #f1e6d6;
-      --line: #4a3b38;
-      --scrim: rgba(20, 16, 15, 0.78);
+      --on-rose: #f6e6ec;
+      --line: #54404a;
+      --scrim: rgba(23, 15, 19, 0.78);
       color-scheme: dark;
     }
-    /* Day palette: same hues on warm paper */
+    /* Day palette: light pink */
     :root[data-theme="light"] {
-      --ink: #f6efe6;
-      --surface: #fffaf3;
-      --raised: #efe4d6;
-      --cream: #2a1d1b;
-      --muted: #6b5750;
-      --rose: #8c3553;
-      --rose-hover: #7a2c47;
-      --theirs: #eadccb;
-      --ring: #a3284f;
-      --alert: #a8261c;
-      --on-rose: #fbf3e8;
-      --line: #cdbba8;
-      --scrim: rgba(255, 250, 243, 0.72);
+      --ink: #fdeef3;
+      --surface: #fff6f9;
+      --raised: #fbe1ea;
+      --cream: #3a1f2b;
+      --muted: #7a5565;
+      --rose: #a8325a;
+      --rose-hover: #942a4e;
+      --theirs: #f8d7e3;
+      --ring: #b0305a;
+      --alert: #b3261e;
+      --on-rose: #fff6f9;
+      --line: #eec0d0;
+      --scrim: rgba(255, 246, 249, 0.8);
       color-scheme: light;
     }
 
@@ -552,7 +552,7 @@
     const themeBtn = document.getElementById('themeBtn');
     function applyTheme(t) {
       document.documentElement.dataset.theme = t;
-      document.querySelector('meta[name="theme-color"]').content = t === 'light' ? '#f6efe6' : '#14100f';
+      document.querySelector('meta[name="theme-color"]').content = t === 'light' ? '#fdeef3' : '#170f13';
       themeBtn.setAttribute('aria-label', t === 'light' ? 'Switch to dark mode' : 'Switch to light mode');
     }
     applyTheme(document.documentElement.dataset.theme);
