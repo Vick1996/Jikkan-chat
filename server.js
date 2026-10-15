@@ -3,6 +3,7 @@ const http = require('http');
 const { Server } = require('socket.io');
 const { createClient } = require('@supabase/supabase-js');
 const webpush = require('web-push');
+const { randomUUID } = require('crypto');
 
 const {
   SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, SUPABASE_SERVICE_ROLE_KEY,
@@ -58,6 +59,31 @@ async function notificationsEnabled(userId) {
   return data ? data.notifications_enabled : true; // default on until the account says otherwise
 }
 
+// Photos, videos and voice notes live in the private "media" bucket (<roomId>/<uuid>.<ext>). The browser uploads
+// straight to Storage with a one-time signed URL from here; everyone reads through short-lived signed URLs.
+const MEDIA_MIMES = {
+  image: { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' },
+  video: { 'video/mp4': 'mp4', 'video/webm': 'webm', 'video/quicktime': 'mov' },
+  audio: { 'audio/webm': 'webm', 'audio/mp4': 'm4a', 'audio/ogg': 'ogg', 'audio/mpeg': 'mp3' }
+};
+const MEDIA_MAX = 25 * 1024 * 1024;   // matches the bucket's file size limit
+const MEDIA_LABEL = { image: '📷 Photo', video: '🎬 Video', audio: '🎤 Voice note' };
+const SIGNED_SECONDS = 3600;          // ponytail: a tab left open > 1 h needs a reload to replay old media
+
+// rows from the messages table -> what the browser gets (with signed URLs for any media)
+async function toClient(rows, names) {
+  const paths = rows.map(r => r.media_path).filter(Boolean);
+  const urls = {};
+  if (paths.length) {
+    const { data } = await db.storage.from('media').createSignedUrls(paths, SIGNED_SECONDS);
+    (data || []).forEach(d => { if (d.signedUrl) urls[d.path] = d.signedUrl; });
+  }
+  return rows.map(r => ({
+    id: r.id, name: names[r.sender_id] || 'Unknown', msg: r.body, ts: r.created_at,
+    media: r.media_path ? { url: urls[r.media_path] || null, kind: r.media_kind, secs: r.media_secs } : undefined
+  }));
+}
+
 async function pushToOthers({ userId, roomId, name }, body) {
   const { data: others } = await db.from('members').select('user_id').eq('room_id', roomId).neq('user_id', userId);
   for (const { user_id } of others || []) {
@@ -97,17 +123,34 @@ io.on('connection', socket => {
   // Handlers are registered synchronously, before any await, so nothing the client sends right after connecting is dropped.
 
   // Last arg is the ack callback: confirms the message is stored
+  // The browser asks for permission to upload one file; we check type/size and hand back a one-time upload token.
+  socket.on('media:upload', async (d, ack) => {
+    const ext = MEDIA_MIMES[d?.kind]?.[d?.mime];
+    if (!ext || !(d.size > 0 && d.size <= MEDIA_MAX)) return ack?.({ ok: false, reason: 'type or size' });
+    const path = `${roomId}/${randomUUID()}.${ext}`;
+    const { data, error } = await db.storage.from('media').createSignedUploadUrl(path);
+    if (error) { console.error('upload url failed', error.message); return ack?.({ ok: false }); }
+    ack?.({ ok: true, path, token: data.token });
+  });
+
+  // Last arg is the ack callback: confirms the message is stored. A message is text, media (optionally with text), or both.
   socket.on('chat message', async (data, ack) => {
     const id = data?.id, msg = typeof data?.msg === 'string' ? data.msg.trim().slice(0, 2000) : '';
-    if (!id || !msg) return ack?.({ ok: false });
+    const m = data?.media;
+    // media must be one of this Room's own uploads (path begins with the Room id; the uuid+ext part is fixed-shape)
+    const media = m && MEDIA_MIMES[m.kind]?.[m.mime] && new RegExp(`^${roomId}/[0-9a-f-]{36}\\.[a-z0-9]{2,4}$`).test(m.path)
+      ? { path: m.path, kind: m.kind, mime: m.mime, secs: Number.isFinite(m.secs) ? Math.min(Math.round(m.secs), 3600) : null } : null;
+    if (!id || (!msg && !media) || (m && !media)) return ack?.({ ok: false });
     const ts = new Date().toISOString();
     // upsert + ignoreDuplicates: a retried send with the same id is a no-op, never a duplicate
-    const { error } = await db.from('messages')
-      .upsert({ id, room_id: roomId, sender_id: userId, body: msg, created_at: ts }, { onConflict: 'id', ignoreDuplicates: true });
+    const row = { id, room_id: roomId, sender_id: userId, body: msg, created_at: ts,
+      media_path: media?.path ?? null, media_kind: media?.kind ?? null, media_mime: media?.mime ?? null, media_secs: media?.secs ?? null };
+    const { error } = await db.from('messages').upsert(row, { onConflict: 'id', ignoreDuplicates: true });
     if (error) { console.error('save failed', error.message); return ack?.({ ok: false }); }
-    socket.to(roomId).emit('chat message', { id, name, msg, ts });
+    const [out] = await toClient([row], { [userId]: name });
+    socket.to(roomId).emit('chat message', out);
     ack?.({ ok: true, ts });
-    pushToOthers(socket.data, msg);
+    pushToOthers(socket.data, msg || MEDIA_LABEL[media.kind]);
   });
 
   // "I have the chat open and can see it": drives the other Member's read receipts and my own unread marker.
@@ -163,7 +206,7 @@ io.on('connection', socket => {
   (async () => {
     const [settingOn, { data: rows }, { data: members }, { data: room }] = await Promise.all([
       notificationsEnabled(userId),
-      db.from('messages').select('id, body, created_at, sender_id').eq('room_id', roomId)
+      db.from('messages').select('id, body, created_at, sender_id, media_path, media_kind, media_secs').eq('room_id', roomId)
         .order('created_at', { ascending: false }).limit(MAX_HISTORY),
       db.from('members').select('user_id, display_name, last_read_at, delivered_at').eq('room_id', roomId),
       db.from('account_settings').select('wallpaper').eq('user_id', userId).maybeSingle()
@@ -179,9 +222,7 @@ io.on('connection', socket => {
 
     socket.emit('me', { name, aliases, notificationsEnabled: settingOn, lastReadAt: mine?.last_read_at || null, othersReadAt, othersDeliveredAt });
     socket.emit('wallpaper', room?.wallpaper ?? null);
-    socket.emit('chat history', (rows || []).reverse().map(r => (
-      { id: r.id, name: names[r.sender_id] || 'Unknown', msg: r.body, ts: r.created_at }
-    )));
+    socket.emit('chat history', await toClient((rows || []).reverse(), names));
     broadcastPresence(roomId);
   })().catch(e => console.error('initial payload failed', e.message));
 });

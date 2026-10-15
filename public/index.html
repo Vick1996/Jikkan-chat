@@ -111,6 +111,18 @@
     #bellBtn[aria-pressed="true"] #bellSlash { display: none; }
 
     .bubble { cursor: pointer; }
+    .bubble.media { padding: 0.25rem; }
+    .bubble.media img, .bubble.media video { display: block; max-width: 100%; max-height: 18rem; border-radius: 0.9rem; background: var(--raised); }
+    .bubble.media img { min-height: 6rem; cursor: zoom-in; }
+    .bubble.media audio { display: block; width: 14rem; max-width: 100%; height: 40px; }
+    .bubble.media .cap { padding: 0.35rem 0.5rem 0.25rem; }
+    dialog#viewer { background: transparent; border: 0; padding: 0; max-width: 100vw; max-height: 100dvh; color: var(--cream); }
+    dialog#viewer::backdrop { background: rgba(0, 0, 0, 0.85); }
+    dialog#viewer img { max-width: 100vw; max-height: calc(100dvh - 4rem); display: block; margin: 0 auto; }
+    dialog#viewer button { display: block; margin: 0.75rem auto 0; }
+    .rec-dot { width: 12px; height: 12px; border-radius: 9999px; background: var(--alert); animation: pulse 1.2s ease-in-out infinite; }
+    @keyframes pulse { 50% { opacity: 0.3; } }
+    #recBar:not(.hidden) { display: flex; }
 
     /* "New messages" marker */
     .divider { display: flex; align-items: center; gap: 0.75rem; margin: 0.5rem 0 0.75rem; color: var(--ring); font-size: 0.75rem; }
@@ -151,6 +163,7 @@
 
     @media (prefers-reduced-motion: reduce) {
       .petal { display: none; }
+      .rec-dot { animation: none; }
       .animate-pulse { animation: none; }
       #splash { transition: none; }
     }
@@ -251,12 +264,30 @@
     <div id="messages" role="log" aria-live="polite" aria-label="Conversation"
          class="flex-1 p-4 overflow-y-auto relative"></div>
 
+    <div id="formMsg" role="status" class="hint hidden px-4 pt-1 text-sm" style="background: var(--raised)"></div>
     <div id="charCount" class="hidden px-4 pt-1 text-xs text-right" style="background: var(--raised); color: var(--muted)"></div>
+    <div id="recBar" class="hidden items-center gap-2 p-2" style="background: var(--raised); padding-bottom: max(0.5rem, env(safe-area-inset-bottom))">
+      <span class="rec-dot" aria-hidden="true"></span>
+      <span id="recTime" class="flex-1" role="timer" aria-label="Recording time">0:00</span>
+      <button type="button" id="recCancel" class="field px-4 py-2 rounded-lg" style="min-height:44px">Cancel</button>
+      <button type="button" id="recSend" class="btn-rose px-5 py-2 rounded-lg">Send</button>
+    </div>
     <form id="form" class="flex gap-2 p-2" style="background: var(--raised); padding-bottom: max(0.5rem, env(safe-area-inset-bottom))" novalidate>
+      <button type="button" id="attachBtn" class="icon-btn flex items-center justify-center rounded-lg" aria-label="Send a photo or video" title="Photo or video">
+        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" aria-hidden="true" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12.5l-8.6 8.6a5.5 5.5 0 01-7.8-7.8l9-9a3.7 3.7 0 015.2 5.2l-9 9a1.8 1.8 0 01-2.6-2.6l8.3-8.3"/></svg>
+      </button>
+      <input id="mediaFile" type="file" accept="image/*,video/*" class="sr-only" tabindex="-1" aria-hidden="true" />
       <input id="input" type="text" placeholder="Type a message..." aria-label="Message" autocomplete="off" maxlength="2000"
              class="field flex-1 px-4 py-2 min-h-[44px] rounded-lg" required />
-      <button type="submit" id="sendBtn" class="btn-rose px-5 py-2 rounded-lg" disabled>Send</button>
+      <button type="submit" id="sendBtn" class="btn-rose px-5 py-2 rounded-lg hidden">Send</button>
+      <button type="button" id="micBtn" class="btn-rose px-3 rounded-lg flex items-center justify-center" aria-label="Record a voice note" title="Voice note" style="min-width:44px">
+        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" aria-hidden="true" viewBox="0 0 24 24" stroke="currentColor"><rect x="9" y="3" width="6" height="12" rx="3" stroke-width="2"/><path stroke-linecap="round" stroke-width="2" d="M5 11a7 7 0 0014 0M12 18v3"/></svg>
+      </button>
     </form>
+    <dialog id="viewer" aria-label="Photo">
+      <img id="viewerImg" alt="Photo from the chat" />
+      <button type="button" id="viewerClose" class="field px-4 py-2 rounded-lg" style="min-height:44px">Close</button>
+    </dialog>
   </main>
 
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/dist/umd/supabase.min.js"></script>
@@ -289,6 +320,9 @@
     const emailHint     = document.getElementById('emailHint');
     const passwordHint  = document.getElementById('passwordHint');
     const charCount     = document.getElementById('charCount');
+    const formMsg = document.getElementById('formMsg'), viewer = document.getElementById('viewer'), viewerImg = document.getElementById('viewerImg');
+    const micBtn = document.getElementById('micBtn'), attachBtn = document.getElementById('attachBtn'), mediaFile = document.getElementById('mediaFile');
+    const recBar = document.getElementById('recBar'), recTime = document.getElementById('recTime');
     const presence      = document.getElementById('presence');
     const romanticModal = document.getElementById('romanticModal');
     const romanticText  = document.getElementById('romanticText');
@@ -363,10 +397,13 @@
     }
 
     // Land on the first new message if there is one, otherwise the bottom
+    let stickBottom = true;
+    messages.addEventListener('scroll', () => { stickBottom = messages.scrollHeight - messages.scrollTop - messages.clientHeight < 200; });
     function scrollToFresh() {
       const d = messages.querySelector('.divider');
       if (d) messages.scrollTop = d.offsetTop - 8;
       else messages.scrollTop = messages.scrollHeight;
+      stickBottom = !d;
     }
 
     // Tell the server I can see the chat (it drives the other person's read ticks and my own unread marker)
@@ -375,6 +412,25 @@
       if (document.hidden || !opened || !socket?.connected) return;
       clearTimeout(readTimer);
       readTimer = setTimeout(() => socket.emit('read'), 300);
+    }
+
+    // Photo / video / voice note inside a bubble. media = { url, kind, secs }
+    function mediaElement(media) {
+      let el;
+      if (media.kind === 'image') {
+        el = document.createElement('img');
+        el.alt = 'Photo'; el.loading = 'lazy'; el.decoding = 'async';
+        el.onclick = () => { viewerImg.src = el.src; viewer.showModal(); };
+        // keep the view pinned to the newest message while photos load in
+        el.onload = () => { if (stickBottom) messages.scrollTop = messages.scrollHeight; };
+      } else {
+        el = document.createElement(media.kind === 'video' ? 'video' : 'audio');
+        el.controls = true; el.preload = 'metadata';
+        if (media.kind === 'video') el.playsInline = true;
+        el.setAttribute('aria-label', media.kind === 'video' ? 'Video' : 'Voice note');
+      }
+      if (media.url) el.src = media.url; else el.alt = 'Media is no longer available';
+      return el;
     }
 
     // Tell the server this app has received the messages on screen (even if the chat is not in view)
@@ -389,7 +445,7 @@
 
     // Display a text message bubble. Tap the bubble to show or hide its time. Own messages get a delivery tick
     // and, while sending, a status line (sending / not sent).
-    function displayMessage(sender, msg, ts) {
+    function displayMessage(sender, msg, ts, media) {
       const mine = sender === name;
       const wrapper = document.createElement('div');
       wrapper.className = `flex items-start mb-3 gap-2 ${mine ? 'justify-end' : 'justify-start'}`;
@@ -405,7 +461,11 @@
       who.textContent = `${sender}: `;
       const bubble = document.createElement('div');
       bubble.className = `bubble px-3 py-2 rounded-2xl break-words ${mine ? 'mine' : 'theirs'}`;
-      bubble.textContent = msg;
+      if (media) {
+        bubble.classList.add('media');
+        bubble.append(mediaElement(media));
+        if (msg) { const cap = document.createElement('div'); cap.className = 'cap'; cap.textContent = msg; bubble.append(cap); }
+      } else bubble.textContent = msg;
       // Time is hidden until the bubble is tapped (or Enter/Space on it); own messages keep their tick visible
       bubble.tabIndex = 0;
       bubble.setAttribute('role', 'button');
@@ -431,8 +491,9 @@
         bubble.setAttribute('aria-expanded', String(show));
         if (!mine) meta.classList.toggle('hidden', !show);
       };
-      bubble.addEventListener('click', toggleTime);
-      bubble.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleTime(); } });
+      // Taps on a photo open it, taps on audio/video controls play them: only the bubble's own padding or text toggles the time
+      bubble.addEventListener('click', e => { if (!e.target.closest('img, audio, video')) toggleTime(); });
+      bubble.addEventListener('keydown', e => { if (e.target === bubble && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); toggleTime(); } });
       col.append(who, bubble, meta);
       if (mine) wrapper.append(col, avatar);
       else wrapper.append(avatar, col);
@@ -642,7 +703,9 @@
     // ---------- Sending ----------
     // Send is off for an empty message; a counter appears when you get close to the 2000-character limit
     input.addEventListener('input', () => {
-      sendBtn.disabled = input.value.trim() === '';
+      const empty = input.value.trim() === '';
+      sendBtn.classList.toggle('hidden', empty);
+      micBtn.classList.toggle('hidden', !empty);
       const n = input.value.length;
       charCount.classList.toggle('hidden', n < 1800);
       charCount.textContent = n >= 2000 ? 'Limit reached: 2000 / 2000' : `${n} / 2000`;
@@ -650,7 +713,7 @@
     });
 
     // "Sending..." only if the ack is slow; on failure keep the text and offer retry. Same id on retry = no duplicate.
-    function deliver(col, text, id) {
+    function deliver(col, text, id, up) {
       let status = col.querySelector('.status');
       if (status) status.remove();
       status = document.createElement('div');
@@ -659,19 +722,115 @@
       col.appendChild(status);
       col.parentElement.dataset.pending = '1';
       const slow = setTimeout(() => { status.textContent = 'Sending…'; }, 800);
-      // socket.io buffers the emit while offline and sends it on reconnect; timeout drops it from the buffer
-      socket.timeout(10000).emit('chat message', { id, msg: text }, (err, res) => {
+      const fail = () => {
         clearTimeout(slow);
-        if (!err && res?.ok) { status.remove(); delete col.parentElement.dataset.pending; stamp(col, res.ts); return; }
         status.innerHTML = '';
         const retry = document.createElement('button');
         retry.type = 'button';
         retry.className = 'retry text-sm';
         retry.textContent = 'Not sent. Tap to retry';
-        retry.onclick = () => deliver(col, text, id);
+        retry.onclick = () => deliver(col, text, id, up);
         status.appendChild(retry);
+      };
+      const send = () => {
+        // socket.io buffers the emit while offline and sends it on reconnect; timeout drops it from the buffer
+        const media = up && { path: up.path, kind: up.kind, mime: up.mime, secs: up.secs };
+        socket.timeout(10000).emit('chat message', { id, msg: text, media }, (err, res) => {
+          if (!err && res?.ok) { clearTimeout(slow); status.remove(); delete col.parentElement.dataset.pending; stamp(col, res.ts); return; }
+          fail();
+        });
+      };
+      // media: upload first (once; a retry after a failed send reuses the uploaded file)
+      if (up && !up.path) uploadMedia(up).then(send, e => { console.error('upload failed', e); fail(); });
+      else send();
+    }
+
+    // up = { blob, kind, mime, secs }. Asks the server for permission, then uploads straight to Storage.
+    function uploadMedia(up) {
+      return new Promise((resolve, reject) => {
+        socket.timeout(10000).emit('media:upload', { kind: up.kind, mime: up.mime, size: up.blob.size }, async (err, res) => {
+          if (err || !res?.ok) return reject(err || new Error(res?.reason || 'refused'));
+          const { error } = await sb.storage.from('media').uploadToSignedUrl(res.path, res.token, up.blob, { contentType: up.mime });
+          if (error) return reject(error);
+          up.path = res.path; resolve();
+        });
       });
     }
+
+    // ---------- Photos, videos, voice notes ----------
+    let formMsgTimer;
+    function showFormMsg(t) {
+      formMsg.textContent = t; formMsg.classList.remove('hidden');
+      clearTimeout(formMsgTimer); formMsgTimer = setTimeout(() => formMsg.classList.add('hidden'), 6000);
+    }
+    const MAX_MB = 25;
+
+    // Show the bubble at once from the local file, then upload in the background
+    function sendMedia(blob, kind, mime, secs) {
+      const url = URL.createObjectURL(blob);
+      deliver(displayMessage(name, '', null, { url, kind, secs }), '', crypto.randomUUID(), { blob, kind, mime, secs });
+    }
+
+    attachBtn.onclick = () => mediaFile.click();
+    mediaFile.onchange = async () => {
+      const f = mediaFile.files[0]; mediaFile.value = '';
+      if (!f) return;
+      try {
+        if (f.type.startsWith('video/')) {
+          if (!['video/mp4', 'video/webm', 'video/quicktime'].includes(f.type)) return showFormMsg('That video type is not supported. Try an MP4.');
+          if (f.size > MAX_MB * 1048576) return showFormMsg(`That video is too big. The limit is ${MAX_MB} MB.`);
+          return sendMedia(f, 'video', f.type, null);
+        }
+        if (!f.type.startsWith('image/')) return showFormMsg('Pick a photo or a video.');
+        // Shrink photos: phone pictures are 3-8 MB, 1600 px is plenty for a chat
+        const bmp = await createImageBitmap(f);
+        const k = Math.min(1, 1600 / Math.max(bmp.width, bmp.height));
+        const c = document.createElement('canvas');
+        c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
+        c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+        const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.82));
+        sendMedia(blob, 'image', 'image/jpeg', null);
+      } catch { showFormMsg('Could not open that file.'); }
+    };
+    document.getElementById('viewerClose').onclick = () => viewer.close();
+    viewer.addEventListener('click', e => { if (e.target === viewer) viewer.close(); });
+
+    // Voice notes: tap the mic to record, then Send or Cancel. Up to 5 minutes.
+    let rec = null;
+    const MAX_REC = 300;
+    function fmtDur(n) { return `${Math.floor(n / 60)}:${String(n % 60).padStart(2, '0')}`; }
+    micBtn.onclick = async () => {
+      if (rec || !navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) return showFormMsg('Voice notes are not supported in this browser.');
+      let stream;
+      try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+      catch { return showFormMsg('The microphone is blocked. Allow it in your browser settings.'); }
+      const type = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg'].find(t => MediaRecorder.isTypeSupported(t));
+      const mr = new MediaRecorder(stream, type ? { mimeType: type } : undefined);
+      rec = { mr, stream, chunks: [], t0: Date.now(), send: false };
+      mr.ondataavailable = e => { if (e.data.size) rec.chunks.push(e.data); };
+      mr.onstop = () => {
+        const r = rec; rec = null;
+        r.stream.getTracks().forEach(t => t.stop());
+        clearInterval(r.timer);
+        recBar.classList.add('hidden'); form.classList.remove('hidden');
+        const secs = Math.round((Date.now() - r.t0) / 1000);
+        if (!r.send) return;
+        if (secs < 1) return showFormMsg('Too short. Hold on a little longer.');
+        const mime = (mr.mimeType || 'audio/webm').split(';')[0];
+        sendMedia(new Blob(r.chunks, { type: mime }), 'audio', mime, secs);
+      };
+      mr.start();
+      form.classList.add('hidden'); recBar.classList.remove('hidden');
+      recTime.textContent = '0:00';
+      rec.timer = setInterval(() => {
+        const s = Math.round((Date.now() - rec.t0) / 1000);
+        recTime.textContent = fmtDur(s);
+        if (s >= MAX_REC) { rec.send = true; rec.mr.stop(); }
+      }, 250);
+      document.getElementById('recSend').focus();
+    };
+    document.getElementById('recCancel').onclick = () => { if (rec) { rec.send = false; rec.mr.stop(); } micBtn.focus(); };
+    document.getElementById('recSend').onclick = () => { if (rec) { rec.send = true; rec.mr.stop(); } micBtn.focus(); };
 
     form.addEventListener('submit', e => {
       e.preventDefault();
@@ -679,7 +838,7 @@
       if (!text) return;
       deliver(displayMessage(name, text), text, crypto.randomUUID());
       input.value = '';
-      sendBtn.disabled = true;
+      sendBtn.classList.add('hidden'); micBtn.classList.remove('hidden');
       charCount.classList.add('hidden');
       input.focus();
     });
@@ -798,7 +957,7 @@
         let marked = false;
         history.forEach(m => {
           if (!marked && myLastReadAt && m.name !== name && new Date(m.ts) > new Date(myLastReadAt)) { addDivider(); marked = true; }
-          displayMessage(m.name, m.msg, m.ts);
+          displayMessage(m.name, m.msg, m.ts, m.media);
         });
         pending.forEach(p => messages.appendChild(p));
         scrollToFresh();
@@ -808,7 +967,7 @@
 
       // System notifications come from Web Push (service worker); here only the unread count in the tab title
       socket.on('chat message', data => {
-        displayMessage(data.name, data.msg, data.ts);
+        displayMessage(data.name, data.msg, data.ts, data.media);
         markDelivered();
         if (document.hidden) { unread++; document.title = `(${unread}) ${baseTitle}`; }
         else markRead();
