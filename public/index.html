@@ -206,7 +206,7 @@
     </div>
     <input id="bgFile" type="file" accept="image/*" class="sr-only" tabindex="-1" />
     <p id="bgMsg" class="hint text-sm mt-2 min-h-[1.25rem]" role="status"></p>
-    <p class="text-xs mt-1" style="color: var(--muted)">Saved on this device only. Your own picture is shrunk to fit.</p>
+    <p class="text-xs mt-1" style="color: var(--muted)">Saved to your account, so it follows you to every device. Only you see it. Your own picture is shrunk to fit.</p>
     <div class="flex gap-2 mt-4">
       <button type="button" id="bgPick" class="btn-rose flex-1 px-4 py-2 rounded-lg">Choose a picture</button>
       <button type="button" id="bgClose" class="field flex-1 px-4 py-2 rounded-lg" style="min-height:44px">Done</button>
@@ -561,41 +561,52 @@
       applyTheme(t); store.set('jk-theme', t);
     };
 
+    // My wallpaper lives on the server, per account: it follows me to every device and nobody else sees it.
+    // Value: null/'photo' = default photo, 'plain', or a JPEG data URL (a picture I uploaded).
     const look = document.getElementById('look');
     const bgMsg = document.getElementById('bgMsg');
     const bgFile = document.getElementById('bgFile');
     const customSwatch = document.getElementById('customSwatch');
-    function applyBg(choice) {
-      const custom = store.get('jk-bg-custom');
-      if (choice === 'custom' && !custom) choice = 'photo';
+    function applyBg(v) {
+      const custom = typeof v === 'string' && v.startsWith('data:');
+      const choice = custom ? 'custom' : (v === 'plain' ? 'plain' : 'photo');
       messages.dataset.bg = choice;
-      if (choice === 'custom') messages.style.setProperty('--chat-bg', `url("${custom}")`);
+      if (custom) messages.style.setProperty('--chat-bg', `url("${v}")`);
       else messages.style.removeProperty('--chat-bg');
       customSwatch.classList.toggle('hidden', !custom);
-      if (custom) customSwatch.firstElementChild.style.backgroundImage = `url("${custom}")`;
+      if (custom) customSwatch.firstElementChild.style.backgroundImage = `url("${v}")`;
       look.querySelectorAll('[data-bg]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.bg === choice)));
     }
-    applyBg(store.get('jk-bg') || 'photo');
-    look.querySelectorAll('[data-bg]').forEach(b => b.onclick = () => { store.set('jk-bg', b.dataset.bg); applyBg(b.dataset.bg); bgMsg.textContent = ''; });
+    function setWallpaper(v) {
+      if (!socket?.connected) { bgMsg.textContent = 'Not connected. Try again in a moment.'; return; }
+      bgMsg.textContent = '';
+      // the server broadcasts it back, so this screen updates the same way the other one does
+      socket.timeout(8000).emit('wallpaper:set', v, (err, res) => { if (err || !res?.ok) bgMsg.textContent = 'Could not change it. Try again.'; });
+    }
+    look.querySelectorAll('[data-bg]').forEach(b => b.onclick = () => { if (b.dataset.bg !== 'custom') setWallpaper(b.dataset.bg); });
     document.getElementById('bgBtn').onclick = () => { bgMsg.textContent = ''; look.showModal(); };
     document.getElementById('bgClose').onclick = () => look.close();
     look.addEventListener('click', e => { if (e.target === look) look.close(); });   // click on the backdrop
     document.getElementById('bgPick').onclick = () => bgFile.click();
 
-    // Shrink the picture first: phones take 5 MB+ photos and localStorage holds about 5 MB in total.
+    // Shrink the picture first: phones take 5 MB+ photos and the server keeps at most ~500 KB.
     bgFile.onchange = async () => {
       const f = bgFile.files[0]; bgFile.value = '';
       if (!f) return;
       if (!f.type.startsWith('image/')) { bgMsg.textContent = 'That file is not a picture.'; return; }
       try {
         const bmp = await createImageBitmap(f);
-        const k = Math.min(1, 1280 / Math.max(bmp.width, bmp.height));
-        const c = document.createElement('canvas');
-        c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
-        c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
-        const url = c.toDataURL('image/jpeg', 0.75);
-        if (!store.set('jk-bg-custom', url)) { bgMsg.textContent = 'No room to save it on this device. Try a smaller picture.'; return; }
-        store.set('jk-bg', 'custom'); applyBg('custom'); bgMsg.textContent = '';
+        let k = Math.min(1, 1280 / Math.max(bmp.width, bmp.height)), url;
+        for (const q of [0.75, 0.6, 0.5, 0.4]) {
+          const c = document.createElement('canvas');
+          c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
+          c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+          url = c.toDataURL('image/jpeg', q);
+          if (url.length <= 600000) break;
+          k *= 0.8;
+        }
+        if (url.length > 600000) { bgMsg.textContent = 'That picture is too detailed. Try another.'; return; }
+        setWallpaper(url);
       } catch { bgMsg.textContent = 'Could not open that picture. Try a JPG or PNG.'; }
     };
 
@@ -723,6 +734,16 @@
       });
 
       // Who I am, my aliases, and my notification setting. First one opens the chat.
+      // Server has none yet: carry over what this device had before wallpapers moved to the account, once.
+      socket.on('wallpaper', v => {
+        if (v == null) {
+          const old = store.get('jk-bg'), pic = store.get('jk-bg-custom');
+          const legacy = old === 'custom' && pic ? pic : (old === 'plain' ? 'plain' : null);
+          if (legacy) { socket.emit('wallpaper:set', legacy); try { localStorage.removeItem('jk-bg'); localStorage.removeItem('jk-bg-custom'); } catch {} }
+        }
+        applyBg(v);
+      });
+
       socket.on('me', me => {
         name = me.name;
         myLastReadAt = me.lastReadAt;

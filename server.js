@@ -19,7 +19,8 @@ const app = express();
 const server = http.createServer(app);
 // Short disconnects (phone sleep, wifi blip) resume without losing events
 const io = new Server(server, {
-  connectionStateRecovery: { maxDisconnectionDuration: 2 * 60 * 1000 }
+  connectionStateRecovery: { maxDisconnectionDuration: 2 * 60 * 1000 },
+  maxHttpBufferSize: 1e6   // a wallpaper upload is up to 600 KB
 });
 
 app.use(express.static('public'));
@@ -83,6 +84,7 @@ async function broadcastPresence(roomId) {
 io.on('connection', socket => {
   const { userId, roomId, name, aliases } = socket.data;
   socket.join(roomId);
+  socket.join(`user:${userId}`);
 
   // Handlers are registered synchronously, before any await, so nothing the client sends right after connecting is dropped.
 
@@ -121,15 +123,27 @@ io.on('connection', socket => {
     ack?.({ ok: !error });
   });
 
+  // My wallpaper (per account, so it follows me to every device): 'photo', 'plain', or a JPEG data URL (<= 600 KB).
+  // My other devices get the change live; nobody else sees it.
+  socket.on('wallpaper:set', async (v, ack) => {
+    const ok = v === 'photo' || v === 'plain' || (typeof v === 'string' && v.startsWith('data:image/jpeg;base64,') && v.length <= 600000);
+    if (!ok) return ack?.({ ok: false });
+    const { error } = await db.from('account_settings').upsert({ user_id: userId, wallpaper: v }, { onConflict: 'user_id' });
+    if (error) { console.error('wallpaper failed', error.message); return ack?.({ ok: false }); }
+    io.to(`user:${userId}`).emit('wallpaper', v);
+    ack?.({ ok: true });
+  });
+
   socket.on('disconnect', () => broadcastPresence(roomId));
 
   // Initial payload: who I am, my settings and read state, then history, then presence
   (async () => {
-    const [settingOn, { data: rows }, { data: members }] = await Promise.all([
+    const [settingOn, { data: rows }, { data: members }, { data: room }] = await Promise.all([
       notificationsEnabled(userId),
       db.from('messages').select('id, body, created_at, sender_id').eq('room_id', roomId)
         .order('created_at', { ascending: false }).limit(MAX_HISTORY),
-      db.from('members').select('user_id, display_name, last_read_at').eq('room_id', roomId)
+      db.from('members').select('user_id, display_name, last_read_at').eq('room_id', roomId),
+      db.from('account_settings').select('wallpaper').eq('user_id', userId).maybeSingle()
     ]);
     const names = Object.fromEntries((members || []).map(m => [m.user_id, m.display_name]));
     const mine = (members || []).find(m => m.user_id === userId);
@@ -138,6 +152,7 @@ io.on('connection', socket => {
       .map(m => m.last_read_at).sort().pop() || null;
 
     socket.emit('me', { name, aliases, notificationsEnabled: settingOn, lastReadAt: mine?.last_read_at || null, othersReadAt });
+    socket.emit('wallpaper', room?.wallpaper ?? null);
     socket.emit('chat history', (rows || []).reverse().map(r => (
       { id: r.id, name: names[r.sender_id] || 'Unknown', msg: r.body, ts: r.created_at }
     )));
