@@ -1,7 +1,20 @@
 const express = require('express');
 const http = require('http');
-const fs = require('fs');
 const { Server } = require('socket.io');
+const { createClient } = require('@supabase/supabase-js');
+const webpush = require('web-push');
+
+const {
+  SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, SUPABASE_SERVICE_ROLE_KEY,
+  VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY, VAPID_SUBJECT
+} = process.env;
+
+// The service role key bypasses row-level security, so every read and write below is scoped to
+// socket.data.roomId, which is only ever set from a verified login token + a members row.
+// Local dev: node --env-file=.env server.js
+const db = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } });
+webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
+
 const app = express();
 const server = http.createServer(app);
 // Short disconnects (phone sleep, wifi blip) resume without losing events
@@ -11,43 +24,99 @@ const io = new Server(server, {
 
 app.use(express.static('public'));
 
-app.get('/api/romantic', (req, res) => {
-  res.json({ message: 'You are the sunshine of my life 🌹' });
+// Public values the browser needs (the publishable key is safe to expose; the row-level rules deny it everything).
+app.get('/config', (req, res) => res.json({
+  supabaseUrl: SUPABASE_URL,
+  supabaseKey: SUPABASE_PUBLISHABLE_KEY,
+  vapidPublicKey: VAPID_PUBLIC_KEY
+}));
+
+const MAX_HISTORY = 200;
+
+// Every socket must present a valid Supabase login token AND belong to a Room.
+// ponytail: a Member belongs to one Room here (first one found); add a room picker when multi-room is real.
+io.use(async (socket, next) => {
+  try {
+    const token = socket.handshake.auth?.token;
+    if (!token) return next(new Error('unauthorized'));
+    const { data: { user }, error } = await db.auth.getUser(token);
+    if (error || !user) return next(new Error('unauthorized'));
+    const { data: member } = await db.from('members')
+      .select('room_id, display_name, aliases').eq('user_id', user.id).limit(1).maybeSingle();
+    if (!member) return next(new Error('forbidden'));
+    socket.data = { userId: user.id, roomId: member.room_id, name: member.display_name, aliases: member.aliases };
+    next();
+  } catch (e) {
+    console.error('auth failed', e.message);
+    next(new Error('unauthorized'));
+  }
 });
 
-// One private room for the two of you.
-// ponytail: single fixed room; add a join code / per-pair room when more than 2 people use it.
-const ROOM = 'jikkan';
-const MAX_HISTORY = 200;
-// Point HISTORY_FILE at a Railway volume path to survive redeploys.
-const HISTORY_FILE = process.env.HISTORY_FILE || './history.json';
-
-let history = [];
-try { history = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8')); } catch {}
-
-function save(entry) {
-  history.push(entry);
-  if (history.length > MAX_HISTORY) history = history.slice(-MAX_HISTORY);
-  try { fs.writeFileSync(HISTORY_FILE, JSON.stringify(history)); } catch (e) { console.error('history save failed', e.message); }
+async function notificationsEnabled(userId) {
+  const { data } = await db.from('account_settings').select('notifications_enabled').eq('user_id', userId).maybeSingle();
+  return data ? data.notifications_enabled : true; // default on until the account says otherwise
 }
 
-io.on('connection', socket => {
-  // Client calls this after entering a name (and again after every reconnect)
-  socket.on('join', () => {
-    socket.join(ROOM);
-    socket.emit('chat history', history);
+async function pushToOthers({ userId, roomId, name }, body) {
+  const { data: others } = await db.from('members').select('user_id').eq('room_id', roomId).neq('user_id', userId);
+  for (const { user_id } of others || []) {
+    if (!(await notificationsEnabled(user_id))) continue;
+    const { data: subs } = await db.from('push_subscriptions').select('*').eq('user_id', user_id);
+    const payload = JSON.stringify({ title: name, body });
+    for (const s of subs || []) {
+      webpush.sendNotification({ endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } }, payload)
+        .catch(async err => {
+          // 404/410 = the browser dropped this subscription; forget it
+          if (err.statusCode === 404 || err.statusCode === 410) await db.from('push_subscriptions').delete().eq('endpoint', s.endpoint);
+          else console.error('push failed', err.statusCode || err.message);
+        });
+    }
+  }
+}
+
+io.on('connection', async socket => {
+  const { userId, roomId, name, aliases } = socket.data;
+  socket.join(roomId);
+
+  const [settingOn, { data: rows }] = await Promise.all([
+    notificationsEnabled(userId),
+    db.from('messages').select('id, body, created_at, sender_id').eq('room_id', roomId)
+      .order('created_at', { ascending: false }).limit(MAX_HISTORY)
+  ]);
+  const { data: members } = await db.from('members').select('user_id, display_name').eq('room_id', roomId);
+  const names = Object.fromEntries((members || []).map(m => [m.user_id, m.display_name]));
+
+  socket.emit('me', { name, aliases, notificationsEnabled: settingOn });
+  socket.emit('chat history', (rows || []).reverse().map(r => (
+    { id: r.id, name: names[r.sender_id] || 'Unknown', msg: r.body, ts: r.created_at }
+  )));
+
+  // Last arg is the ack callback: confirms the message is stored
+  socket.on('chat message', async (data, ack) => {
+    const id = data?.id, msg = typeof data?.msg === 'string' ? data.msg.trim() : '';
+    if (!id || !msg) return ack?.({ ok: false });
+    // upsert + ignoreDuplicates: a retried send with the same id is a no-op, never a duplicate
+    const { error } = await db.from('messages')
+      .upsert({ id, room_id: roomId, sender_id: userId, body: msg.slice(0, 2000) }, { onConflict: 'id', ignoreDuplicates: true });
+    if (error) { console.error('save failed', error.message); return ack?.({ ok: false }); }
+    socket.to(roomId).emit('chat message', { id, name, msg: msg.slice(0, 2000) });
+    ack?.({ ok: true });
+    pushToOthers(socket.data, msg.slice(0, 2000));
   });
 
-  // Last arg is the ack callback: confirms the server stored + relayed it
-  socket.on('chat message', (data, ack) => {
-    if (!socket.rooms.has(ROOM) || typeof data?.msg !== 'string' || !data.msg.trim()) return ack?.({ ok: false });
-    const entry = { id: data.id, name: String(data.name).slice(0, 40), msg: data.msg.slice(0, 2000), ts: Date.now() };
-    save(entry);
-    socket.to(ROOM).emit('chat message', entry);
-    ack?.({ ok: true, ts: entry.ts });
+  // Notifications: one switch per account (all devices); each device registers its own push subscription.
+  socket.on('push:subscribe', async (sub, ack) => {
+    if (!sub?.endpoint || !sub?.keys?.p256dh || !sub?.keys?.auth) return ack?.({ ok: false });
+    const { error } = await db.from('push_subscriptions')
+      .upsert({ endpoint: sub.endpoint, user_id: userId, p256dh: sub.keys.p256dh, auth: sub.keys.auth }, { onConflict: 'endpoint' });
+    ack?.({ ok: !error });
   });
 
-  socket.on('voice message', data => socket.to(ROOM).emit('voice message', data));
+  socket.on('notifications:set', async (enabled, ack) => {
+    const { error } = await db.from('account_settings')
+      .upsert({ user_id: userId, notifications_enabled: !!enabled }, { onConflict: 'user_id' });
+    ack?.({ ok: !error });
+  });
 });
 
 const PORT = process.env.PORT || 3000;

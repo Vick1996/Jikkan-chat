@@ -75,6 +75,8 @@
 
     .icon-btn { min-width: 44px; min-height: 44px; color: var(--muted); }
     .icon-btn:hover { color: var(--cream); }
+    #bellBtn[aria-pressed="true"] { color: var(--ring); }
+    #bellBtn[aria-pressed="true"] #bellSlash { display: none; }
 
     #connBanner { background: var(--raised); color: var(--cream); }
     .retry { color: var(--alert); min-height: 44px; text-decoration: underline; text-underline-offset: 3px; }
@@ -116,15 +118,20 @@
     </p>
   </div>
 
-  <!-- Name Entry Modal -->
-  <div id="nameModal" role="dialog" aria-modal="true" aria-labelledby="nameLabel"
-       class="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-20 p-4">
-    <form id="nameForm" class="card p-6 rounded-2xl w-full max-w-xs" novalidate>
-      <label id="nameLabel" for="nameInput" class="block text-2xl font-semibold mb-4 text-center">Enter Your Name</label>
-      <input id="nameInput" type="text" autocomplete="given-name" aria-describedby="nameError"
-             class="field w-full px-4 py-2 min-h-[44px] rounded-lg mb-2" />
-      <p id="nameError" role="alert" class="text-sm mb-2 min-h-[1.25rem]" style="color: var(--alert)"></p>
-      <button id="nameBtn" type="submit" class="btn-rose w-full px-4 py-2 rounded-lg">Join Chat</button>
+  <!-- Sign-in Modal (also used to choose a new password after a reset email) -->
+  <div id="authModal" role="dialog" aria-modal="true" aria-labelledby="authTitle"
+       class="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center hidden z-20 p-4">
+    <form id="authForm" class="card p-6 rounded-2xl w-full max-w-xs" novalidate>
+      <h2 id="authTitle" class="text-2xl font-semibold mb-4 text-center">Sign in</h2>
+      <div id="emailWrap">
+        <label for="emailInput" class="block text-sm mb-1" style="color: var(--muted)">Email</label>
+        <input id="emailInput" type="email" autocomplete="email" class="field w-full px-4 py-2 min-h-[44px] rounded-lg mb-3" />
+      </div>
+      <label id="passwordLabel" for="passwordInput" class="block text-sm mb-1" style="color: var(--muted)">Password</label>
+      <input id="passwordInput" type="password" autocomplete="current-password" class="field w-full px-4 py-2 min-h-[44px] rounded-lg mb-2" />
+      <p id="authMsg" role="alert" class="text-sm mb-2 min-h-[1.25rem]"></p>
+      <button id="authBtn" type="submit" class="btn-rose w-full px-4 py-2 rounded-lg">Sign in</button>
+      <button id="forgotBtn" type="button" class="retry w-full text-sm mt-1" style="color: var(--muted)">Forgot password?</button>
     </form>
   </div>
 
@@ -143,13 +150,22 @@
   <main id="chatApp" class="hidden flex-col">
     <header class="px-4 py-1 flex items-center justify-between" style="background: var(--raised)">
       <h1 id="appName" class="text-2xl font-bold">Jikkan</h1>
-      <button id="logoutBtn" class="icon-btn flex items-center justify-center rounded-lg" title="Leave chat" aria-label="Leave chat">
-        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" aria-hidden="true"
-             viewBox="0 0 24 24" stroke="currentColor">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                d="M15 19l-7-7 7-7M8 12h13" />
-        </svg>
-      </button>
+      <div class="flex items-center">
+        <button id="bellBtn" class="icon-btn flex items-center justify-center rounded-lg" aria-pressed="false" aria-label="Notifications off" title="Notifications off">
+          <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" aria-hidden="true" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                  d="M15 17h5l-1.4-1.4A2 2 0 0118 14.2V11a6 6 0 10-12 0v3.2a2 2 0 01-.6 1.4L4 17h5m6 0a3 3 0 11-6 0m6 0H9" />
+            <path id="bellSlash" stroke-linecap="round" stroke-width="2" d="M4 4l16 16" />
+          </svg>
+        </button>
+        <button id="logoutBtn" class="icon-btn flex items-center justify-center rounded-lg" title="Sign out" aria-label="Sign out">
+          <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" aria-hidden="true"
+               viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                  d="M15 19l-7-7 7-7M8 12h13" />
+          </svg>
+        </button>
+      </div>
     </header>
 
     <!-- Connection status: only visible when something is wrong -->
@@ -165,18 +181,30 @@
     </form>
   </main>
 
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/dist/umd/supabase.min.js"></script>
   <!-- Socket.IO -->
   <script src="https://cdn.socket.io/4.7.1/socket.io.min.js"></script>
   <script>
-    const socket = io();
+    let socket, supabase, vapidKey;
     let name = '';
+    let opened = false;       // chat screen shown
+    let authReady = false;    // sign-in form or chat is ready, so the splash may go
+    let notificationsOn = false;
+    let authMode = 'signin';  // 'signin' | 'newpass'
     const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const SPECIAL_NAMES = ['nikya', 'nikita', 'nikku'];
 
     // Elements
-    const nameModal     = document.getElementById('nameModal');
-    const nameForm      = document.getElementById('nameForm');
-    const nameInput     = document.getElementById('nameInput');
-    const nameError     = document.getElementById('nameError');
+    const authModal     = document.getElementById('authModal');
+    const authForm      = document.getElementById('authForm');
+    const authTitle     = document.getElementById('authTitle');
+    const authMsg       = document.getElementById('authMsg');
+    const authBtn       = document.getElementById('authBtn');
+    const forgotBtn     = document.getElementById('forgotBtn');
+    const emailWrap     = document.getElementById('emailWrap');
+    const emailInput    = document.getElementById('emailInput');
+    const passwordInput = document.getElementById('passwordInput');
+    const passwordLabel = document.getElementById('passwordLabel');
     const romanticModal = document.getElementById('romanticModal');
     const romanticText  = document.getElementById('romanticText');
     const romanticBtn   = document.getElementById('romanticBtn');
@@ -187,6 +215,7 @@
     const input         = document.getElementById('input');
     const sendBtn       = document.getElementById('sendBtn');
     const logoutBtn     = document.getElementById('logoutBtn');
+    const bellBtn       = document.getElementById('bellBtn');
     const connBanner    = document.getElementById('connBanner');
     const splash        = document.getElementById('splash');
     const splashNote    = document.getElementById('splashNote');
@@ -247,47 +276,84 @@
     }
 
     function openChat() {
+      opened = true;
+      authReady = true;
       romanticModal.classList.add('hidden');
-      nameModal.classList.add('hidden');
+      authModal.classList.add('hidden');
       chatApp.classList.remove('hidden');
       input.focus();
-      if (!socket.connected) showBanner('Connecting…');
+      if (!socket?.connected) showBanner('Connecting…');
+      hideSplash();
     }
 
-    // Handle Join Chat (button or Enter)
-    nameForm.addEventListener('submit', e => {
+    // ---------- Sign-in ----------
+    function showAuth(mode, message = '', isError = true) {
+      authMode = mode;
+      const newpass = mode === 'newpass';
+      authTitle.textContent = newpass ? 'Choose a new password' : 'Sign in';
+      authBtn.textContent = newpass ? 'Save password' : 'Sign in';
+      passwordLabel.textContent = newpass ? 'New password' : 'Password';
+      passwordInput.autocomplete = newpass ? 'new-password' : 'current-password';
+      emailWrap.classList.toggle('hidden', newpass);
+      forgotBtn.classList.toggle('hidden', newpass);
+      authMsg.textContent = message;
+      authMsg.style.color = isError ? 'var(--alert)' : 'var(--muted)';
+      chatApp.classList.add('hidden');
+      authModal.classList.remove('hidden');
+      authReady = true;
+      hideSplash();
+      (newpass ? passwordInput : emailInput).focus();
+    }
+
+    authForm.addEventListener('submit', async e => {
       e.preventDefault();
-      const val = nameInput.value.trim();
-      if (!val) {
-        nameError.textContent = 'Please tell me who is here.';
-        nameInput.focus();
-        return;
-      }
-      nameError.textContent = '';
-      name = val;
-      joinRoom();
-      if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission();
-      if (['nikya', 'nikita', 'nikku'].includes(name.toLowerCase())) {
-        burstPetals();
-        romanticText.textContent = getRandomRomantic();
-        romanticModal.classList.remove('hidden');
-        romanticBtn.onclick = openChat;
-        romanticBtn.focus();
-      } else {
-        openChat();
+      authBtn.disabled = true;
+      try {
+        if (authMode === 'newpass') {
+          if (passwordInput.value.length < 8) return showAuth('newpass', 'Use at least 8 characters.');
+          const { error } = await supabase.auth.updateUser({ password: passwordInput.value });
+          if (error) return showAuth('newpass', error.message);
+          history.replaceState(null, '', location.pathname);
+          passwordInput.value = '';
+          return startSession();
+        }
+        const email = emailInput.value.trim();
+        if (!email || !passwordInput.value) return showAuth('signin', 'Enter your email and password.');
+        const { error } = await supabase.auth.signInWithPassword({ email, password: passwordInput.value });
+        if (error) return showAuth('signin', 'Email or password is wrong.');
+        passwordInput.value = '';
+        // Asked here because it needs a tap; the answer decides whether the bell can turn on
+        if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission();
+        startSession();
+      } finally {
+        authBtn.disabled = false;
       }
     });
-    nameInput.focus();
 
-    // Enable/disable Send button
+    forgotBtn.addEventListener('click', async () => {
+      const email = emailInput.value.trim();
+      if (!email) return showAuth('signin', 'Type your email first, then tap Forgot password.');
+      const { error } = await supabase.auth.resetPasswordForEmail(email, { redirectTo: location.origin });
+      showAuth('signin', error ? 'Could not send the email. Try again in a minute.' : 'Check your email for a reset link.', !!error);
+    });
+
+    // Sign out = manual only. Also stop pushes to this device so a shared browser stays private.
+    // ponytail: the server forgets the dead subscription on its next failed push (410), not instantly.
+    logoutBtn.onclick = async () => {
+      try {
+        const reg = await navigator.serviceWorker?.getRegistration();
+        (await reg?.pushManager.getSubscription())?.unsubscribe();
+      } catch {}
+      await supabase.auth.signOut();
+      location.reload();
+    };
+
+    // ---------- Sending ----------
     input.addEventListener('input', () => {
       sendBtn.disabled = input.value.trim() === '';
     });
 
-    // Leave = reload
-    logoutBtn.onclick = () => location.reload();
-
-    // Send a message. Shows "Sending..." only if the ack is slow; on failure keeps the text and offers retry.
+    // "Sending..." only if the ack is slow; on failure keep the text and offer retry. Same id on retry = no duplicate.
     function deliver(col, text, id) {
       let status = col.querySelector('.status');
       if (status) status.remove();
@@ -298,7 +364,7 @@
       col.parentElement.dataset.pending = '1';
       const slow = setTimeout(() => { status.textContent = 'Sending…'; }, 800);
       // socket.io buffers the emit while offline and sends it on reconnect; timeout drops it from the buffer
-      socket.timeout(10000).emit('chat message', { id, name, msg: text }, (err, res) => {
+      socket.timeout(10000).emit('chat message', { id, msg: text }, (err, res) => {
         clearTimeout(slow);
         if (!err && res?.ok) { status.remove(); delete col.parentElement.dataset.pending; return; }
         status.innerHTML = '';
@@ -321,33 +387,116 @@
       input.focus();
     });
 
-    // Receive chat history
-    // Re-render from history (also runs after reconnects), but keep bubbles still waiting for their ack
-    socket.on('chat history', history => {
-      const pending = [...messages.querySelectorAll('[data-pending]')];
-      messages.innerHTML = '';
-      history.forEach(m => displayMessage(m.name, m.msg));
-      pending.forEach(p => messages.appendChild(p));
-      messages.scrollTop = messages.scrollHeight;
-    });
-
-    // Notify when the tab is in the background: system notification + unread count in the title
+    // ---------- Notifications (one switch per account; each device registers itself) ----------
     const baseTitle = document.title;
     let unread = 0;
     const swReady = 'serviceWorker' in navigator ? navigator.serviceWorker.register('/sw.js').then(() => navigator.serviceWorker.ready) : Promise.resolve();
     document.addEventListener('visibilitychange', () => {
       if (!document.hidden) { unread = 0; document.title = baseTitle; }
     });
-    function notify(data) {
-      unread++;
-      document.title = `(${unread}) ${baseTitle}`;
-      if (!('Notification' in window) || Notification.permission !== 'granted') return;
-      swReady.then(reg => reg?.showNotification(data.name, { body: data.msg, tag: 'jikkan', renotify: true }));
+
+    function renderBell() {
+      const on = notificationsOn && 'Notification' in window && Notification.permission === 'granted';
+      bellBtn.setAttribute('aria-pressed', String(on));
+      const label = on ? 'Notifications on' : 'Notifications off';
+      bellBtn.setAttribute('aria-label', label);
+      bellBtn.title = label;
     }
-    socket.on('chat message', data => {
-      displayMessage(data.name, data.msg);
-      if (document.hidden) notify(data);
+
+    function b64ToBytes(b64) {
+      const pad = '='.repeat((4 - b64.length % 4) % 4);
+      const raw = atob((b64 + pad).replace(/-/g, '+').replace(/_/g, '/'));
+      return Uint8Array.from(raw, c => c.charCodeAt(0));
+    }
+
+    // Register this device for pushes (safe to repeat: the server upserts by endpoint)
+    async function ensurePush() {
+      if (!('PushManager' in window) || Notification.permission !== 'granted') return;
+      const reg = await swReady;
+      const sub = (await reg.pushManager.getSubscription())
+        || await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToBytes(vapidKey) });
+      socket.emit('push:subscribe', sub.toJSON());
+    }
+
+    bellBtn.addEventListener('click', async () => {
+      const on = bellBtn.getAttribute('aria-pressed') === 'true';
+      if (on) {
+        notificationsOn = false;
+        socket.emit('notifications:set', false);
+      } else {
+        if (!('Notification' in window)) return showBanner('This browser does not support notifications.');
+        if (Notification.permission === 'default') await Notification.requestPermission();
+        if (Notification.permission !== 'granted') return showBanner('Notifications are blocked. Allow them in your browser’s site settings.');
+        notificationsOn = true;
+        socket.emit('notifications:set', true);
+        ensurePush();
+      }
+      renderBell();
     });
+
+    // ---------- Realtime ----------
+    function showBanner(text) {
+      if (chatApp.classList.contains('hidden')) return;
+      connBanner.textContent = text;
+      connBanner.classList.remove('hidden');
+    }
+
+    function wireSocket() {
+      // auth as a function: every (re)connect sends a fresh token, so an expired one never strands the chat
+      socket = io({ auth: cb => supabase.auth.getSession().then(({ data }) => cb({ token: data.session?.access_token })) });
+
+      socket.on('connect', () => {
+        connBanner.classList.add('hidden');
+      });
+      socket.on('disconnect', () => showBanner('Offline. Messages will send when you are back.'));
+      socket.on('connect_error', err => {
+        if (err.message === 'unauthorized') return supabase.auth.signOut().then(() => showAuth('signin', 'Please sign in again.'));
+        if (err.message === 'forbidden') return showAuth('signin', 'This account is not a member of the chat.');
+        showBanner('Can’t reach the server. Retrying…');
+      });
+
+      // Who I am, my aliases, and my notification setting. First one opens the chat.
+      socket.on('me', me => {
+        name = me.name;
+        notificationsOn = me.notificationsEnabled;
+        renderBell();
+        if (notificationsOn) ensurePush();
+        if (opened) return;
+        const special = [me.name, ...me.aliases].some(n => SPECIAL_NAMES.includes(n.toLowerCase()));
+        if (special) {
+          authModal.classList.add('hidden');
+          burstPetals();
+          romanticText.textContent = getRandomRomantic();
+          romanticModal.classList.remove('hidden');
+          romanticBtn.onclick = openChat;
+          romanticBtn.focus();
+          authReady = true;
+          hideSplash();
+        } else {
+          openChat();
+        }
+      });
+
+      // Re-render from history (also runs after reconnects), but keep bubbles still waiting for their ack
+      socket.on('chat history', history => {
+        const pending = [...messages.querySelectorAll('[data-pending]')];
+        messages.innerHTML = '';
+        history.forEach(m => displayMessage(m.name, m.msg));
+        pending.forEach(p => messages.appendChild(p));
+        messages.scrollTop = messages.scrollHeight;
+      });
+
+      // System notifications come from Web Push (service worker); here only the unread count in the tab title
+      socket.on('chat message', data => {
+        displayMessage(data.name, data.msg);
+        if (document.hidden) { unread++; document.title = `(${unread}) ${baseTitle}`; }
+      });
+    }
+
+    function startSession() {
+      authModal.classList.add('hidden');
+      wireSocket();
+    }
 
     // Romantic message pool
     const romanticPool = [
@@ -373,28 +522,11 @@
       return t.replace("{name}", name);
     }
 
-    // Connection status banner
-    function showBanner(text) {
-      if (chatApp.classList.contains('hidden')) return;
-      connBanner.textContent = text;
-      connBanner.classList.remove('hidden');
-    }
-    socket.on('disconnect', () => showBanner('Offline. Messages will send when you are back.'));
-    socket.on('connect_error', () => showBanner('Can’t reach the server. Retrying…'));
-
-    // Join the private room (after name entry and after every reconnect)
-    function joinRoom() { if (name) socket.emit('join'); }
-    socket.on('connect', () => {
-      joinRoom();
-      connBanner.classList.add('hidden');
-      hideSplash();
-    });
-
-    // Splash: at least 2s, and only once the server has answered. After 4s say why it's slow;
-    // after 12s give up waiting so the banner can explain.
+    // Splash: at least 2s, and only once there is something to show (sign-in form or the chat). After 4s say why
+    // it's slow; after 12s give up waiting and open the chat shell so the banner can explain.
     let minShown = false, splashGone = false;
     function hideSplash(force) {
-      if (splashGone || (!force && !(minShown && socket.connected))) return;
+      if (splashGone || (!force && !(minShown && authReady))) return;
       splashGone = true;
       splash.classList.add('hidden');
       setTimeout(() => splash.remove(), 500);
@@ -402,8 +534,23 @@
     addEventListener('load', () => {
       setTimeout(() => { minShown = true; hideSplash(); }, 2000);
       setTimeout(() => { if (!splashGone) splashNote.classList.remove('hidden'); }, 4000);
-      setTimeout(() => hideSplash(true), 12000);
+      setTimeout(() => { if (!splashGone) { if (!authReady) openChat(); hideSplash(true); } }, 12000);
     });
+
+    // ---------- Boot ----------
+    (async () => {
+      const cfg = await (await fetch('/config')).json();
+      vapidKey = cfg.vapidPublicKey;
+      supabase = window.supabase.createClient(cfg.supabaseUrl, cfg.supabaseKey);
+      // A password-reset email link lands here with type=recovery in the URL
+      if (location.hash.includes('type=recovery')) {
+        supabase.auth.onAuthStateChange(ev => { if (ev === 'PASSWORD_RECOVERY') showAuth('newpass', '', false); });
+        return;
+      }
+      const { data: { session } } = await supabase.auth.getSession();
+      if (session) startSession();
+      else showAuth('signin', '', false);
+    })();
   </script>
 </body>
 </html>
