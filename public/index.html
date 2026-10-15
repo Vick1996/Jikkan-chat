@@ -6,8 +6,8 @@
   <meta name="theme-color" content="#14100f" />
   <title>Jikkan</title>
 
-  <!-- Tailwind CSS -->
-  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Tailwind, built ahead of time (npm run build:css) instead of compiled in the browser -->
+  <link href="/styles.css" rel="stylesheet" />
 
   <!-- Japanese-style font -->
   <link href="https://fonts.googleapis.com/css2?family=Sawarabi+Mincho&display=swap" rel="stylesheet" />
@@ -27,14 +27,9 @@
       --alert: #f2a7a0;
     }
 
-    /* Use Sawarabi Mincho for header and message text */
-    #appName,
-    .bubble,
-    .avatar {
-      font-family: 'Sawarabi Mincho', serif;
-    }
-
     body {
+      /* Serif everywhere. Sawarabi Mincho covers kana/kanji; Latin falls through to the system serif. */
+      font-family: 'Sawarabi Mincho', 'Noto Serif JP', Georgia, 'Times New Roman', serif;
       background: var(--ink);
       color: var(--cream);
       /* --app-h follows the visual viewport, so the on-screen keyboard never covers the input */
@@ -78,6 +73,19 @@
     #bellBtn[aria-pressed="true"] { color: var(--ring); }
     #bellBtn[aria-pressed="true"] #bellSlash { display: none; }
 
+    .bubble { cursor: pointer; }
+
+    /* "New messages" marker */
+    .divider { display: flex; align-items: center; gap: 0.75rem; margin: 0.5rem 0 0.75rem; color: var(--ring); font-size: 0.75rem; }
+    .divider::before, .divider::after { content: ''; flex: 1; height: 1px; background: currentColor; opacity: 0.4; }
+
+    /* Delivery tick: one check = sent, two = read */
+    .tick { width: 16px; height: 16px; color: var(--muted); }
+    .tick.read { color: var(--ring); }
+
+    /* Presence line under the title */
+    #presence:not(:empty)::before { content: ''; display: inline-block; width: 6px; height: 6px; margin-right: 6px; border-radius: 9999px; background: var(--ring); vertical-align: middle; }
+
     #connBanner { background: var(--raised); color: var(--cream); }
     .field[aria-invalid="true"] { border-color: var(--alert); }
     .hint { color: var(--alert); }
@@ -115,7 +123,7 @@
 
   <!-- Splash Screen: stays until the server answers (a sleeping server can take ~1 min) -->
   <div id="splash" class="fixed inset-0 flex flex-col items-center justify-center gap-4 z-50">
-    <img src="logo.png" alt="Jikkan" class="w-64 h-64 animate-pulse" />
+    <img src="logo.webp" alt="Jikkan" width="256" height="256" class="w-64 h-64 animate-pulse" />
     <p id="splashNote" role="status" class="hidden text-center px-6" style="color: var(--muted)">
       Waking up&hellip; this can take a minute.
     </p>
@@ -154,7 +162,10 @@
   <!-- Main Chat UI -->
   <main id="chatApp" class="hidden flex-col">
     <header class="px-4 py-1 flex items-center justify-between" style="background: var(--raised)">
-      <h1 id="appName" class="text-2xl font-bold">Jikkan</h1>
+      <div>
+        <h1 id="appName" class="text-2xl font-bold leading-tight">Jikkan <span lang="ja" class="text-sm font-normal" style="color: var(--muted)">実感</span></h1>
+        <p id="presence" class="text-xs min-h-[1rem]" style="color: var(--muted)" role="status"></p>
+      </div>
       <div class="flex items-center">
         <button id="bellBtn" class="icon-btn flex items-center justify-center rounded-lg" aria-pressed="false" aria-label="Notifications off" title="Notifications off">
           <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" aria-hidden="true" viewBox="0 0 24 24" stroke="currentColor">
@@ -167,7 +178,7 @@
           <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" aria-hidden="true"
                viewBox="0 0 24 24" stroke="currentColor">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                  d="M15 19l-7-7 7-7M8 12h13" />
+                  d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4M16 17l5-5-5-5M21 12H9" />
           </svg>
         </button>
       </div>
@@ -196,6 +207,8 @@
     let opened = false;       // chat screen shown
     let authReady = false;    // sign-in form or chat is ready, so the splash may go
     let notificationsOn = false;
+    let myLastReadAt = null;  // when I last had the chat open (for the "new messages" marker)
+    let othersReadAt = null;  // when the other person last had the chat open (for read ticks)
     let authMode = 'signin';  // 'signin' | 'newpass'
     const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
     const SPECIAL_NAMES = ['nikya', 'nikita', 'nikku'];
@@ -214,6 +227,7 @@
     const emailHint     = document.getElementById('emailHint');
     const passwordHint  = document.getElementById('passwordHint');
     const charCount     = document.getElementById('charCount');
+    const presence      = document.getElementById('presence');
     const romanticModal = document.getElementById('romanticModal');
     const romanticText  = document.getElementById('romanticText');
     const romanticBtn   = document.getElementById('romanticBtn');
@@ -239,11 +253,65 @@
     vv?.addEventListener('resize', fitViewport);
     addEventListener('resize', fitViewport);
 
-    // Display a text message bubble. Own messages get a status line (sending / not sent).
-    function displayMessage(sender, msg) {
+    // ---------- Message bits: time (shown on tap), delivery tick, "new messages" marker ----------
+    function fmtTime(ts) {
+      const d = new Date(ts);
+      const t = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+      return d.toDateString() === new Date().toDateString() ? t : `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${t}`;
+    }
+
+    const TICK_SENT = '<svg class="tick" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 13l4 4L19 7"/></svg><span class="sr-only">Sent</span>';
+    const TICK_READ = '<svg class="tick read" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 13l4 4L16 7M9 17l1 1L22 7"/></svg><span class="sr-only">Read</span>';
+
+    // Own message: one check once the server has it, two once the other person has had the chat open since.
+    function renderTick(wrapper) {
+      const tick = wrapper.querySelector('.tick-slot');
+      if (!tick || !wrapper.dataset.ts) return;
+      const read = othersReadAt && new Date(wrapper.dataset.ts) <= new Date(othersReadAt);
+      tick.innerHTML = read ? TICK_READ : TICK_SENT;
+    }
+    function applyReceipts() { messages.querySelectorAll('[data-own][data-ts]').forEach(renderTick); }
+
+    // The server has stored the message: give it its time and show the tick
+    function stamp(col, ts) {
+      const wrapper = col.parentElement;
+      wrapper.dataset.ts = ts;
+      const time = col.querySelector('time');
+      time.dateTime = ts; time.textContent = fmtTime(ts);
+      col.querySelector('.meta').classList.remove('hidden');
+      renderTick(wrapper);
+    }
+
+    function addDivider() {
+      const el = document.createElement('div');
+      el.className = 'divider';
+      el.setAttribute('role', 'separator');
+      el.innerHTML = '<span>New messages</span>';
+      messages.appendChild(el);
+      return el;
+    }
+
+    // Land on the first new message if there is one, otherwise the bottom
+    function scrollToFresh() {
+      const d = messages.querySelector('.divider');
+      if (d) messages.scrollTop = d.offsetTop - 8;
+      else messages.scrollTop = messages.scrollHeight;
+    }
+
+    // Tell the server I can see the chat (it drives the other person's read ticks and my own unread marker)
+    let readTimer;
+    function markRead() {
+      if (document.hidden || !opened || !socket?.connected) return;
+      clearTimeout(readTimer);
+      readTimer = setTimeout(() => socket.emit('read'), 300);
+    }
+
+    // Display a text message bubble. Tap the bubble to show or hide its time. Own messages get a delivery tick
+    // and, while sending, a status line (sending / not sent).
+    function displayMessage(sender, msg, ts) {
       const mine = sender === name;
       const wrapper = document.createElement('div');
-      wrapper.className = `flex items-end mb-3 gap-2 ${mine ? 'justify-end' : 'justify-start'}`;
+      wrapper.className = `flex items-start mb-3 gap-2 ${mine ? 'justify-end' : 'justify-start'}`;
       const avatar = document.createElement('div');
       avatar.className = `avatar w-8 h-8 shrink-0 rounded-full flex items-center justify-center font-bold ${mine ? 'mine-av' : 'theirs-av'}`;
       avatar.setAttribute('aria-hidden', 'true');
@@ -257,9 +325,37 @@
       const bubble = document.createElement('div');
       bubble.className = `bubble px-3 py-2 rounded-2xl break-words ${mine ? 'mine' : 'theirs'}`;
       bubble.textContent = msg;
-      col.append(who, bubble);
+      // Time is hidden until the bubble is tapped (or Enter/Space on it); own messages keep their tick visible
+      bubble.tabIndex = 0;
+      bubble.setAttribute('role', 'button');
+      bubble.setAttribute('aria-expanded', 'false');
+      const meta = document.createElement('div');
+      meta.className = 'meta flex items-center gap-2 text-xs mt-1';
+      meta.style.color = 'var(--muted)';
+      const time = document.createElement('time');
+      time.className = 'hidden';
+      meta.append(time);
+      if (mine) {
+        const slot = document.createElement('span');
+        slot.className = 'tick-slot flex items-center';
+        meta.append(slot);
+        wrapper.dataset.own = '1';
+      }
+      if (ts) { time.dateTime = ts; time.textContent = fmtTime(ts); wrapper.dataset.ts = ts; }
+      // Others' rows (and own rows still sending) have nothing to show until the time is toggled / acked
+      meta.classList.toggle('hidden', !(mine && ts));
+      const toggleTime = () => {
+        if (!time.textContent) return;
+        const show = time.classList.toggle('hidden') === false;
+        bubble.setAttribute('aria-expanded', String(show));
+        if (!mine) meta.classList.toggle('hidden', !show);
+      };
+      bubble.addEventListener('click', toggleTime);
+      bubble.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleTime(); } });
+      col.append(who, bubble, meta);
       if (mine) wrapper.append(col, avatar);
       else wrapper.append(avatar, col);
+      renderTick(wrapper);
       messages.appendChild(wrapper);
       messages.scrollTop = messages.scrollHeight;
       return col;
@@ -291,6 +387,8 @@
       authModal.classList.add('hidden');
       chatApp.classList.remove('hidden');
       input.focus();
+      scrollToFresh();
+      markRead();
       if (!socket?.connected) showBanner('Connecting…');
       hideSplash();
     }
@@ -417,7 +515,7 @@
       // socket.io buffers the emit while offline and sends it on reconnect; timeout drops it from the buffer
       socket.timeout(10000).emit('chat message', { id, msg: text }, (err, res) => {
         clearTimeout(slow);
-        if (!err && res?.ok) { status.remove(); delete col.parentElement.dataset.pending; return; }
+        if (!err && res?.ok) { status.remove(); delete col.parentElement.dataset.pending; stamp(col, res.ts); return; }
         status.innerHTML = '';
         const retry = document.createElement('button');
         retry.type = 'button';
@@ -444,8 +542,9 @@
     let unread = 0;
     const swReady = 'serviceWorker' in navigator ? navigator.serviceWorker.register('/sw.js').then(() => navigator.serviceWorker.ready) : Promise.resolve();
     document.addEventListener('visibilitychange', () => {
-      if (!document.hidden) { unread = 0; document.title = baseTitle; }
+      if (!document.hidden) { unread = 0; document.title = baseTitle; markRead(); }
     });
+    addEventListener('focus', markRead);
 
     function renderBell() {
       const on = notificationsOn && 'Notification' in window && Notification.permission === 'granted';
@@ -510,6 +609,8 @@
       // Who I am, my aliases, and my notification setting. First one opens the chat.
       socket.on('me', me => {
         name = me.name;
+        myLastReadAt = me.lastReadAt;
+        othersReadAt = me.othersReadAt;
         notificationsOn = me.notificationsEnabled;
         renderBell();
         if (notificationsOn) ensurePush();
@@ -533,15 +634,31 @@
       socket.on('chat history', history => {
         const pending = [...messages.querySelectorAll('[data-pending]')];
         messages.innerHTML = '';
-        history.forEach(m => displayMessage(m.name, m.msg));
+        // "New messages" marker goes before the first message from someone else that is newer than when I last had the chat open
+        let marked = false;
+        history.forEach(m => {
+          if (!marked && myLastReadAt && m.name !== name && new Date(m.ts) > new Date(myLastReadAt)) { addDivider(); marked = true; }
+          displayMessage(m.name, m.msg, m.ts);
+        });
         pending.forEach(p => messages.appendChild(p));
-        messages.scrollTop = messages.scrollHeight;
+        scrollToFresh();
+        markRead();
       });
 
       // System notifications come from Web Push (service worker); here only the unread count in the tab title
       socket.on('chat message', data => {
-        displayMessage(data.name, data.msg);
+        displayMessage(data.name, data.msg, data.ts);
         if (document.hidden) { unread++; document.title = `(${unread}) ${baseTitle}`; }
+        else markRead();
+      });
+
+      // The other person had the chat open: everything I sent up to then is read
+      socket.on('read', r => { othersReadAt = r.ts; applyReceipts(); });
+
+      // Who is here right now
+      socket.on('presence', p => {
+        const others = p.online.filter(n => n !== name);
+        presence.textContent = others.length ? `${others.join(' & ')} ${others.length > 1 ? 'are' : 'is'} here` : '';
       });
     }
 

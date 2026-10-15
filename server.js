@@ -74,34 +74,37 @@ async function pushToOthers({ userId, roomId, name }, body) {
   }
 }
 
-io.on('connection', async socket => {
+// Who is connected right now in a Room (display names, de-duplicated across a person's devices)
+async function broadcastPresence(roomId) {
+  const socks = await io.in(roomId).fetchSockets();
+  io.to(roomId).emit('presence', { online: [...new Set(socks.map(s => s.data.name))] });
+}
+
+io.on('connection', socket => {
   const { userId, roomId, name, aliases } = socket.data;
   socket.join(roomId);
 
-  const [settingOn, { data: rows }] = await Promise.all([
-    notificationsEnabled(userId),
-    db.from('messages').select('id, body, created_at, sender_id').eq('room_id', roomId)
-      .order('created_at', { ascending: false }).limit(MAX_HISTORY)
-  ]);
-  const { data: members } = await db.from('members').select('user_id, display_name').eq('room_id', roomId);
-  const names = Object.fromEntries((members || []).map(m => [m.user_id, m.display_name]));
-
-  socket.emit('me', { name, aliases, notificationsEnabled: settingOn });
-  socket.emit('chat history', (rows || []).reverse().map(r => (
-    { id: r.id, name: names[r.sender_id] || 'Unknown', msg: r.body, ts: r.created_at }
-  )));
+  // Handlers are registered synchronously, before any await, so nothing the client sends right after connecting is dropped.
 
   // Last arg is the ack callback: confirms the message is stored
   socket.on('chat message', async (data, ack) => {
-    const id = data?.id, msg = typeof data?.msg === 'string' ? data.msg.trim() : '';
+    const id = data?.id, msg = typeof data?.msg === 'string' ? data.msg.trim().slice(0, 2000) : '';
     if (!id || !msg) return ack?.({ ok: false });
+    const ts = new Date().toISOString();
     // upsert + ignoreDuplicates: a retried send with the same id is a no-op, never a duplicate
     const { error } = await db.from('messages')
-      .upsert({ id, room_id: roomId, sender_id: userId, body: msg.slice(0, 2000) }, { onConflict: 'id', ignoreDuplicates: true });
+      .upsert({ id, room_id: roomId, sender_id: userId, body: msg, created_at: ts }, { onConflict: 'id', ignoreDuplicates: true });
     if (error) { console.error('save failed', error.message); return ack?.({ ok: false }); }
-    socket.to(roomId).emit('chat message', { id, name, msg: msg.slice(0, 2000) });
-    ack?.({ ok: true });
-    pushToOthers(socket.data, msg.slice(0, 2000));
+    socket.to(roomId).emit('chat message', { id, name, msg, ts });
+    ack?.({ ok: true, ts });
+    pushToOthers(socket.data, msg);
+  });
+
+  // "I have the chat open and can see it": drives the other Member's read receipts and my own unread marker.
+  socket.on('read', async () => {
+    const ts = new Date().toISOString();
+    const { error } = await db.from('members').update({ last_read_at: ts }).eq('room_id', roomId).eq('user_id', userId);
+    if (!error) socket.to(roomId).emit('read', { name, ts });
   });
 
   // Notifications: one switch per account (all devices); each device registers its own push subscription.
@@ -117,6 +120,29 @@ io.on('connection', async socket => {
       .upsert({ user_id: userId, notifications_enabled: !!enabled }, { onConflict: 'user_id' });
     ack?.({ ok: !error });
   });
+
+  socket.on('disconnect', () => broadcastPresence(roomId));
+
+  // Initial payload: who I am, my settings and read state, then history, then presence
+  (async () => {
+    const [settingOn, { data: rows }, { data: members }] = await Promise.all([
+      notificationsEnabled(userId),
+      db.from('messages').select('id, body, created_at, sender_id').eq('room_id', roomId)
+        .order('created_at', { ascending: false }).limit(MAX_HISTORY),
+      db.from('members').select('user_id, display_name, last_read_at').eq('room_id', roomId)
+    ]);
+    const names = Object.fromEntries((members || []).map(m => [m.user_id, m.display_name]));
+    const mine = (members || []).find(m => m.user_id === userId);
+    // latest time any other Member had the chat open: messages older than this show as read
+    const othersReadAt = (members || []).filter(m => m.user_id !== userId && m.last_read_at)
+      .map(m => m.last_read_at).sort().pop() || null;
+
+    socket.emit('me', { name, aliases, notificationsEnabled: settingOn, lastReadAt: mine?.last_read_at || null, othersReadAt });
+    socket.emit('chat history', (rows || []).reverse().map(r => (
+      { id: r.id, name: names[r.sender_id] || 'Unknown', msg: r.body, ts: r.created_at }
+    )));
+    broadcastPresence(roomId);
+  })().catch(e => console.error('initial payload failed', e.message));
 });
 
 const PORT = process.env.PORT || 3000;
