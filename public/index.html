@@ -183,6 +183,7 @@
       if (!val) return;
       name = val;
       joinRoom();
+      if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission();
       burstPetals();
       if (['nikya', 'nikita', 'nikku'].includes(name.toLowerCase())) {
         romanticText.textContent = getRandomRomantic();
@@ -229,7 +230,23 @@
     });
 
     // Receive new chat messages
-    socket.on('chat message', data => displayMessage(data.name, data.msg));
+    // Notify when the tab is in the background: system notification + unread count in the title
+    const baseTitle = document.title;
+    let unread = 0;
+    const swReady = 'serviceWorker' in navigator ? navigator.serviceWorker.register('/sw.js').then(() => navigator.serviceWorker.ready) : Promise.resolve();
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) { unread = 0; document.title = baseTitle; }
+    });
+    function notify(data) {
+      unread++;
+      document.title = `(${unread}) ${baseTitle}`;
+      if (!('Notification' in window) || Notification.permission !== 'granted') return;
+      swReady.then(reg => reg?.showNotification(data.name, { body: data.msg, tag: 'jikkan', renotify: true }));
+    }
+    socket.on('chat message', data => {
+      displayMessage(data.name, data.msg);
+      if (document.hidden) notify(data);
+    });
 
     // Romantic message pool
     const romanticPool = [
