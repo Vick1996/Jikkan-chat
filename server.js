@@ -70,6 +70,30 @@ const MEDIA_MAX = 25 * 1024 * 1024;   // matches the bucket's file size limit
 const MEDIA_LABEL = { image: '📷 Photo', video: '🎬 Video', audio: '🎤 Voice note' };
 const SIGNED_SECONDS = 3600;          // ponytail: a tab left open > 1 h needs a reload to replay old media
 
+// Supabase free plan = 1 GB of files. When this Room's media would pass 85% of the quota, delete the OLDEST files
+// until it is back under 70% (so we don't delete on every upload). The messages stay; their media is replaced by a note.
+// ponytail: counts only this Room's folder (the app has one Room); sum all folders if more Rooms ever share the bucket.
+const MEDIA_QUOTA = Number(process.env.MEDIA_QUOTA_BYTES) || 1024 ** 3;
+const MEDIA_HIGH = 0.85, MEDIA_LOW = 0.70;
+async function trimMedia(roomId, incoming = 0) {
+  const bucket = db.storage.from('media');
+  const { data, error } = await bucket.list(roomId, { limit: 1000, sortBy: { column: 'created_at', order: 'asc' } });
+  if (error) return console.error('storage list failed', error.message);
+  let used = data.reduce((n, f) => n + (f.metadata?.size || 0), 0);
+  if (used + incoming <= MEDIA_QUOTA * MEDIA_HIGH) return;
+  const gone = [];
+  for (const f of data) {                       // oldest first
+    if (used + incoming <= MEDIA_QUOTA * MEDIA_LOW) break;
+    gone.push(`${roomId}/${f.name}`); used -= f.metadata?.size || 0;
+  }
+  if (!gone.length) return;
+  const { error: rmErr } = await bucket.remove(gone);
+  if (rmErr) return console.error('storage delete failed', rmErr.message);
+  await db.from('messages').update({ body: '(photo/video/voice note removed to free space)' }).in('media_path', gone).eq('body', '');
+  await db.from('messages').update({ media_path: null, media_kind: null, media_mime: null, media_secs: null }).in('media_path', gone);
+  console.log(`media over ${MEDIA_HIGH * 100}% of quota: removed ${gone.length} oldest file(s)`);
+}
+
 // rows from the messages table -> what the browser gets (with signed URLs for any media)
 async function toClient(rows, names) {
   const paths = rows.map(r => r.media_path).filter(Boolean);
@@ -127,6 +151,7 @@ io.on('connection', socket => {
   socket.on('media:upload', async (d, ack) => {
     const ext = MEDIA_MIMES[d?.kind]?.[d?.mime];
     if (!ext || !(d.size > 0 && d.size <= MEDIA_MAX)) return ack?.({ ok: false, reason: 'type or size' });
+    await trimMedia(roomId, d.size);
     const path = `${roomId}/${randomUUID()}.${ext}`;
     const { data, error } = await db.storage.from('media').createSignedUploadUrl(path);
     if (error) { console.error('upload url failed', error.message); return ack?.({ ok: false }); }
