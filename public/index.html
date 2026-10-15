@@ -139,7 +139,7 @@
     const logoutBtn     = document.getElementById('logoutBtn');
 
     // Display a text message bubble
-    function displayMessage(sender, msg) {
+    function displayMessage(sender, msg, pending = false) {
       const wrapper = document.createElement('div');
       wrapper.className = `flex items-start mb-2 gap-3 ${sender === name ? 'justify-end' : 'justify-start'}`;
       const avatar = document.createElement('div');
@@ -150,8 +150,10 @@
       bubble.textContent = msg;
       if (sender === name) wrapper.append(bubble, avatar);
       else wrapper.append(avatar, bubble);
+      if (pending) wrapper.classList.add('opacity-50');
       messages.appendChild(wrapper);
       messages.scrollTop = messages.scrollHeight;
+      return wrapper;
     }
 
     // Create a single falling petal
@@ -180,6 +182,7 @@
       const val = nameInput.value.trim();
       if (!val) return;
       name = val;
+      joinRoom();
       burstPetals();
       if (['nikya', 'nikita', 'nikku'].includes(name.toLowerCase())) {
         romanticText.textContent = getRandomRomantic();
@@ -208,13 +211,20 @@
       e.preventDefault();
       const text = input.value.trim();
       if (!text) return;
-      socket.emit('chat message', { name, msg: text });
+      const id = crypto.randomUUID();
+      const el = displayMessage(name, text, true);
+      // Buffered by socket.io while offline and sent on reconnect; 50% opacity until the server acks
+      socket.timeout(10000).emit('chat message', { id, name, msg: text }, (err, res) => {
+        if (!err && res?.ok) el.classList.remove('opacity-50');
+        else el.querySelector('.bubble').textContent = '⚠ ' + text;
+      });
       input.value = '';
       sendBtn.disabled = true;
     });
 
     // Receive chat history
     socket.on('chat history', history => {
+      messages.innerHTML = '';
       history.forEach(m => displayMessage(m.name, m.msg));
     });
 
@@ -245,8 +255,9 @@
       return t.replace("{name}", name);
     }
 
-    // Request chat history on connect
-    socket.emit('request history');
+    // Join the private room (after name entry and after every reconnect)
+    function joinRoom() { if (name) socket.emit('join'); }
+    socket.on('connect', joinRoom);
 
     // Wait for everything to load, then hide the splash after 2s
 window.addEventListener('load', () => {
