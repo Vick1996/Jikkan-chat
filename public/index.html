@@ -79,6 +79,9 @@
     #bellBtn[aria-pressed="true"] #bellSlash { display: none; }
 
     #connBanner { background: var(--raised); color: var(--cream); }
+    .field[aria-invalid="true"] { border-color: var(--alert); }
+    .hint { color: var(--alert); }
+    .hint.ok { color: var(--muted); }
     .retry { color: var(--alert); min-height: 44px; text-decoration: underline; text-underline-offset: 3px; }
 
     /* Petal fall animation */
@@ -125,10 +128,12 @@
       <h2 id="authTitle" class="text-2xl font-semibold mb-4 text-center">Sign in</h2>
       <div id="emailWrap">
         <label for="emailInput" class="block text-sm mb-1" style="color: var(--muted)">Email</label>
-        <input id="emailInput" type="email" autocomplete="email" class="field w-full px-4 py-2 min-h-[44px] rounded-lg mb-3" />
+        <input id="emailInput" type="email" autocomplete="email" aria-describedby="emailHint" class="field w-full px-4 py-2 min-h-[44px] rounded-lg" />
+        <p id="emailHint" class="text-xs min-h-[1.25rem] mt-1 hint" role="status"></p>
       </div>
-      <label id="passwordLabel" for="passwordInput" class="block text-sm mb-1" style="color: var(--muted)">Password</label>
-      <input id="passwordInput" type="password" autocomplete="current-password" class="field w-full px-4 py-2 min-h-[44px] rounded-lg mb-2" />
+      <label id="passwordLabel" for="passwordInput" class="block text-sm mb-1 mt-1" style="color: var(--muted)">Password</label>
+      <input id="passwordInput" type="password" autocomplete="current-password" aria-describedby="passwordHint" class="field w-full px-4 py-2 min-h-[44px] rounded-lg" />
+      <p id="passwordHint" class="text-xs min-h-[1.25rem] mt-1 hint" role="status"></p>
       <p id="authMsg" role="alert" class="text-sm mb-2 min-h-[1.25rem]"></p>
       <button id="authBtn" type="submit" class="btn-rose w-full px-4 py-2 rounded-lg">Sign in</button>
       <button id="forgotBtn" type="button" class="retry w-full text-sm mt-1" style="color: var(--muted)">Forgot password?</button>
@@ -174,8 +179,9 @@
     <div id="messages" role="log" aria-live="polite" aria-label="Conversation"
          class="flex-1 p-4 overflow-y-auto relative"></div>
 
+    <div id="charCount" class="hidden px-4 pt-1 text-xs text-right" style="background: var(--raised); color: var(--muted)"></div>
     <form id="form" class="flex gap-2 p-2" style="background: var(--raised); padding-bottom: max(0.5rem, env(safe-area-inset-bottom))" novalidate>
-      <input id="input" type="text" placeholder="Type a message..." aria-label="Message" autocomplete="off"
+      <input id="input" type="text" placeholder="Type a message..." aria-label="Message" autocomplete="off" maxlength="2000"
              class="field flex-1 px-4 py-2 min-h-[44px] rounded-lg" required />
       <button type="submit" id="sendBtn" class="btn-rose px-5 py-2 rounded-lg" disabled>Send</button>
     </form>
@@ -205,6 +211,9 @@
     const emailInput    = document.getElementById('emailInput');
     const passwordInput = document.getElementById('passwordInput');
     const passwordLabel = document.getElementById('passwordLabel');
+    const emailHint     = document.getElementById('emailHint');
+    const passwordHint  = document.getElementById('passwordHint');
+    const charCount     = document.getElementById('charCount');
     const romanticModal = document.getElementById('romanticModal');
     const romanticText  = document.getElementById('romanticText');
     const romanticBtn   = document.getElementById('romanticBtn');
@@ -286,9 +295,45 @@
       hideSplash();
     }
 
+    // ---------- Live validation ----------
+    // A field only starts complaining after you leave it once (so "gir" never errors mid-typing);
+    // from then on it re-checks on every keystroke and the message clears the moment the value is OK.
+    // New-password feedback is live from the first keystroke, since that rule is something you need to see.
+    const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+    const touched = new Set();
+    function setHint(field, hintEl, msg, ok = false) {
+      hintEl.textContent = msg;
+      hintEl.className = 'text-xs min-h-[1.25rem] mt-1 hint' + (ok ? ' ok' : '');
+      field.setAttribute('aria-invalid', String(!!msg && !ok));
+    }
+    function checkEmail(show) {
+      const v = emailInput.value.trim();
+      const msg = !v ? 'Enter your email.' : EMAIL_RE.test(v) ? '' : 'That doesn’t look like an email address.';
+      if (show || touched.has('email')) setHint(emailInput, emailHint, msg);
+      return !msg;
+    }
+    function checkPassword(show) {
+      const v = passwordInput.value;
+      let msg = '', ok = false;
+      if (authMode === 'newpass') {
+        const need = 8 - v.length;
+        if (need > 0) msg = v ? `${need} more character${need === 1 ? '' : 's'} needed.` : 'Use at least 8 characters.';
+        else ok = true;
+      } else if (!v) msg = 'Enter your password.';
+      if (show || touched.has('password')) setHint(passwordInput, passwordHint, ok ? 'Looks good.' : msg, ok);
+      return !msg;
+    }
+    emailInput.addEventListener('input', () => checkEmail(false));
+    emailInput.addEventListener('blur', () => { if (emailInput.value) { touched.add('email'); checkEmail(false); } });
+    passwordInput.addEventListener('input', () => { if (authMode === 'newpass') touched.add('password'); checkPassword(false); });
+    passwordInput.addEventListener('blur', () => { if (passwordInput.value) { touched.add('password'); checkPassword(false); } });
+
     // ---------- Sign-in ----------
     function showAuth(mode, message = '', isError = true) {
       authMode = mode;
+      touched.clear();
+      setHint(emailInput, emailHint, '');
+      setHint(passwordInput, passwordHint, '');
       const newpass = mode === 'newpass';
       authTitle.textContent = newpass ? 'Choose a new password' : 'Sign in';
       authBtn.textContent = newpass ? 'Save password' : 'Sign in';
@@ -310,7 +355,7 @@
       authBtn.disabled = true;
       try {
         if (authMode === 'newpass') {
-          if (passwordInput.value.length < 8) return showAuth('newpass', 'Use at least 8 characters.');
+          if (!checkPassword(true)) return passwordInput.focus();
           const { error } = await sb.auth.updateUser({ password: passwordInput.value });
           if (error) return showAuth('newpass', error.message);
           history.replaceState(null, '', location.pathname);
@@ -318,7 +363,8 @@
           return startSession();
         }
         const email = emailInput.value.trim();
-        if (!email || !passwordInput.value) return showAuth('signin', 'Enter your email and password.');
+        const okEmail = checkEmail(true), okPass = checkPassword(true);
+        if (!okEmail || !okPass) return (okEmail ? passwordInput : emailInput).focus();
         const { error } = await sb.auth.signInWithPassword({ email, password: passwordInput.value });
         if (error) return showAuth('signin', 'Email or password is wrong.');
         passwordInput.value = '';
@@ -332,7 +378,7 @@
 
     forgotBtn.addEventListener('click', async () => {
       const email = emailInput.value.trim();
-      if (!email) return showAuth('signin', 'Type your email first, then tap Forgot password.');
+      if (!checkEmail(true)) return emailInput.focus();
       const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: location.origin });
       showAuth('signin', error ? 'Could not send the email. Try again in a minute.' : 'Check your email for a reset link.', !!error);
     });
@@ -349,8 +395,13 @@
     };
 
     // ---------- Sending ----------
+    // Send is off for an empty message; a counter appears when you get close to the 2000-character limit
     input.addEventListener('input', () => {
       sendBtn.disabled = input.value.trim() === '';
+      const n = input.value.length;
+      charCount.classList.toggle('hidden', n < 1800);
+      charCount.textContent = n >= 2000 ? 'Limit reached: 2000 / 2000' : `${n} / 2000`;
+      charCount.style.color = n >= 2000 ? 'var(--alert)' : 'var(--muted)';
     });
 
     // "Sending..." only if the ack is slow; on failure keep the text and offer retry. Same id on retry = no duplicate.
@@ -384,6 +435,7 @@
       deliver(displayMessage(name, text), text, crypto.randomUUID());
       input.value = '';
       sendBtn.disabled = true;
+      charCount.classList.add('hidden');
       input.focus();
     });
 
