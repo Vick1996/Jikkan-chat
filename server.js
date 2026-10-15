@@ -169,6 +169,9 @@ io.on('connection', socket => {
   });
 
   // The app says whether the chat is in view (tab/app in front). Drives "here" and last seen.
+  // Typing: relayed live to the other Member, never stored
+  socket.on('typing', on => socket.to(roomId).emit('typing', { name, on: !!on }));
+
   socket.on('visible', v => {
     const was = !!socket.data.visible;
     socket.data.visible = !!v;

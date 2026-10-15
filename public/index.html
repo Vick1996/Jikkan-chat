@@ -837,7 +837,7 @@
       const text = input.value.trim();
       if (!text) return;
       deliver(displayMessage(name, text), text, crypto.randomUUID());
-      input.value = '';
+      input.value = ""; sendTyping(false);
       sendBtn.classList.add('hidden'); micBtn.classList.remove('hidden');
       charCount.classList.add('hidden');
       input.focus();
@@ -967,6 +967,7 @@
 
       // System notifications come from Web Push (service worker); here only the unread count in the tab title
       socket.on('chat message', data => {
+        if (typingName === data.name) { typingName = null; renderPresence(); }
         displayMessage(data.name, data.msg, data.ts, data.media);
         markDelivered();
         if (document.hidden) { unread++; document.title = `(${unread}) ${baseTitle}`; }
@@ -978,14 +979,41 @@
       socket.on('delivered', r => { othersDeliveredAt = r.ts; applyReceipts(); });
 
       // Who is here right now
-      socket.on('presence', p => {
+      socket.on('presence', p => { lastPresence = p; renderPresence(); });
+      // "typing…" replaces the presence line while she types; auto-clears in case the stop signal is lost
+      socket.on('typing', t => {
+        clearTimeout(typingTimer);
+        typingName = t.on ? t.name : null;
+        if (t.on) typingTimer = setTimeout(() => { typingName = null; renderPresence(); }, 6000);
+        renderPresence();
+      });
+    }
+
+    let lastPresence = null, typingName = null, typingTimer;
+    function renderPresence() {
+      const p = lastPresence;
+      if (typingName) { presence.setAttribute('data-here', ''); presence.textContent = `${typingName} is typing…`; return; }
+      if (!p) return;
+      {
         const others = p.online.filter(n => n !== name);
         const away = Object.keys(p.lastSeen || {}).filter(n => n !== name);
         presence.toggleAttribute('data-here', others.length > 0);
         presence.textContent = others.length ? `${others.join(' & ')} ${others.length > 1 ? 'are' : 'is'} here`
           : (away.length ? `${away[0]} last seen ${fmtSeen(p.lastSeen[away[0]])}` : '');
-      });
+      }
     }
+
+    // Tell the other phone I'm typing: "on" at most every 3 s while keys are pressed, "off" after 4 s idle / on send
+    let typingSent = 0, typingOff;
+    function sendTyping(on) {
+      if (!socket?.connected) return;
+      if (on) { if (Date.now() - typingSent > 3000) { typingSent = Date.now(); socket.emit('typing', true); } }
+      else if (typingSent) { typingSent = 0; socket.emit('typing', false); }
+      clearTimeout(typingOff);
+      if (on) typingOff = setTimeout(() => sendTyping(false), 4000);
+    }
+    input.addEventListener('input', () => sendTyping(input.value.length > 0));
+    input.addEventListener('blur', () => sendTyping(false));
 
     function startSession() {
       authModal.classList.add('hidden');
