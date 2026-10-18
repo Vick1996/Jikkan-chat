@@ -25,6 +25,33 @@
         "rule": "overused-font",
         "value": "fraunces",
         "createdAt": "2026-10-15T13:50:11.048Z"
+      },
+      {
+        "rule": "broken-image",
+        "value": "*",
+        "files": [
+          "public/index.html"
+        ],
+        "createdAt": "2026-10-18T08:44:43.643Z",
+        "reason": "Claude: #viewerImg src is set from JS when a photo is opened; not a placeholder"
+      },
+      {
+        "rule": "pulsing-dot",
+        "value": "*",
+        "files": [
+          "public/index.html"
+        ],
+        "createdAt": "2026-10-18T08:44:54.713Z",
+        "reason": "Claude: .rec-dot pulses only while a voice note is actually recording (live state); not decorative"
+      },
+      {
+        "rule": "side-tab",
+        "value": "*",
+        "files": [
+          "public/index.html"
+        ],
+        "createdAt": "2026-10-18T08:47:36.798Z",
+        "reason": "Claude: .quote left bar is the standard reply-quote marker (WhatsApp/Telegram style), not a decorative card accent"
       }
     ]
   }

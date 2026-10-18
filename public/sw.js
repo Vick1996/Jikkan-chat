@@ -2,7 +2,7 @@
 self.addEventListener('push', e => {
   const d = e.data ? e.data.json() : {};
   e.waitUntil(clients.matchAll({ type: 'window', includeUncontrolled: true }).then(cs => {
-    if (cs.some(c => c.visibilityState === 'visible')) return;
+    if (cs.some(c => c.visibilityState === 'visible' && c.focused)) return;
     return self.registration.showNotification(d.title || 'Jikkan', { body: d.body, tag: 'jikkan', renotify: true });
   }));
 });

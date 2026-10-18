@@ -22,9 +22,13 @@ Another name a Member is known by, such as "Girya" or "Nikku". A Member has a Di
 **Account**:
 A person's sign-in. A Member is an Account that belongs to a Room. Account-wide settings, such as notifications on or off, belong to the Account, not to a device.
 
+**Media**:
+A photo, video or voice note attached to a Message. Stored privately and shown through short-lived links. When storage runs low, the oldest Media is deleted first and its Message keeps a note saying so.
+
 ## Relationships
 
 - A **Room** has one or more **Members**; a **Member** is an **Account** in a **Room**.
 - A **Message** belongs to exactly one **Room** and was sent by one **Member**.
 - An **Account** can only read the **Rooms** it is a **Member** of.
 - Sign-up is closed: **Accounts** are created by the owner, not by visitors.
+- A **Message** has at most one **Media**; **Media** belongs to the **Room** its Message was sent in.

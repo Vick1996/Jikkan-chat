@@ -55,6 +55,7 @@
       color-scheme: light;
     }
 
+    html { overscroll-behavior: none; }
     body {
       /* Serif everywhere: Fraunces for Latin, Shippori Mincho for kana/kanji (Google serves only the glyph slices used). */
       font-family: Fraunces, 'Shippori Mincho', 'Noto Serif JP', Georgia, 'Times New Roman', serif;
@@ -111,6 +112,13 @@
     #bellBtn[aria-pressed="true"] #bellSlash { display: none; }
 
     .bubble { cursor: pointer; }
+    .quote { display: block; width: 100%; text-align: left; color: inherit; background: rgba(0, 0, 0, 0.14); border-left: 3px solid currentColor; border-radius: 0.4rem; padding: 0.15rem 0.5rem; margin-bottom: 0.3rem; font-size: 0.85em; }
+    .quote b, .quote span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 16rem; }
+    .quote span { opacity: 0.85; }
+    .reply-btn { color: var(--muted); text-decoration: underline; min-height: 1.5rem; }
+    #replyBar { display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 0.75rem 0; background: var(--raised); }
+    #replyBar.hidden { display: none; }
+    #replyBar .quote { flex: 1; min-width: 0; cursor: default; margin: 0; background: transparent; border-color: var(--rose); }
     .bubble.media { padding: 0.25rem; }
     .bubble.media img, .bubble.media video { display: block; max-width: 100%; max-height: 18rem; border-radius: 0.9rem; background: var(--raised); }
     .bubble.media img { min-height: 6rem; cursor: zoom-in; }
@@ -266,6 +274,10 @@
 
     <div id="formMsg" role="status" class="hint hidden px-4 pt-1 text-sm" style="background: var(--raised)"></div>
     <div id="charCount" class="hidden px-4 pt-1 text-xs text-right" style="background: var(--raised); color: var(--muted)"></div>
+    <div id="replyBar" class="hidden">
+      <div class="quote"><b id="replyName"></b><span id="replySnip"></span></div>
+      <button type="button" id="replyCancel" class="field px-3 rounded-lg" style="min-height:44px" aria-label="Cancel reply">✕</button>
+    </div>
     <div id="recBar" class="hidden items-center gap-2 p-2" style="background: var(--raised); padding-bottom: max(0.5rem, env(safe-area-inset-bottom))">
       <span class="rec-dot" aria-hidden="true"></span>
       <span id="recTime" class="flex-1" role="timer" aria-label="Recording time">0:00</span>
@@ -276,7 +288,7 @@
       <button type="button" id="attachBtn" class="icon-btn flex items-center justify-center rounded-lg" aria-label="Send a photo or video" title="Photo or video">
         <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" aria-hidden="true" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12.5l-8.6 8.6a5.5 5.5 0 01-7.8-7.8l9-9a3.7 3.7 0 015.2 5.2l-9 9a1.8 1.8 0 01-2.6-2.6l8.3-8.3"/></svg>
       </button>
-      <input id="mediaFile" type="file" accept="image/*,video/*" class="sr-only" tabindex="-1" aria-hidden="true" />
+      <input id="mediaFile" type="file" accept="image/*,video/*" multiple class="sr-only" tabindex="-1" aria-hidden="true" />
       <input id="input" type="text" placeholder="Type a message..." aria-label="Message" autocomplete="off" maxlength="2000"
              class="field flex-1 px-4 py-2 min-h-[44px] rounded-lg" required />
       <button type="submit" id="sendBtn" class="btn-rose px-5 py-2 rounded-lg hidden">Send</button>
@@ -347,6 +359,7 @@
     }
     fitViewport();
     vv?.addEventListener('resize', fitViewport);
+    vv?.addEventListener('scroll', fitViewport); // the browser pans the page up to reveal the focused input; snap it back
     addEventListener('resize', fitViewport);
 
     // ---------- Message bits: time (shown on tap), delivery tick, "new messages" marker ----------
@@ -445,9 +458,11 @@
 
     // Display a text message bubble. Tap the bubble to show or hide its time. Own messages get a delivery tick
     // and, while sending, a status line (sending / not sent).
-    function displayMessage(sender, msg, ts, media) {
+    // extra = { id, replyTo: { id, name, snip } }: id lets this message be replied to; replyTo is the quote shown on top
+    function displayMessage(sender, msg, ts, media, extra) {
       const mine = sender === name;
       const wrapper = document.createElement('div');
+      if (extra?.id) wrapper.dataset.id = extra.id;
       wrapper.className = `flex items-start mb-3 gap-2 ${mine ? 'justify-end' : 'justify-start'}`;
       const avatar = document.createElement('div');
       avatar.className = `avatar w-8 h-8 shrink-0 rounded-full flex items-center justify-center font-bold ${mine ? 'mine-av' : 'theirs-av'}`;
@@ -466,6 +481,18 @@
         bubble.append(mediaElement(media));
         if (msg) { const cap = document.createElement('div'); cap.className = 'cap'; cap.textContent = msg; bubble.append(cap); }
       } else bubble.textContent = msg;
+      if (extra?.replyTo) {
+        const q = document.createElement('button');
+        q.type = 'button'; q.className = 'quote';
+        const qn = document.createElement('b'), qs = document.createElement('span');
+        qn.textContent = extra.replyTo.name; qs.textContent = extra.replyTo.snip;
+        q.append(qn, qs);
+        q.onclick = e => {
+          e.stopPropagation();
+          messages.querySelector(`[data-id="${extra.replyTo.id}"]`)?.scrollIntoView({ block: 'center', behavior: reduceMotion ? 'auto' : 'smooth' });
+        };
+        bubble.prepend(q);
+      }
       // Time is hidden until the bubble is tapped (or Enter/Space on it); own messages keep their tick visible
       bubble.tabIndex = 0;
       bubble.setAttribute('role', 'button');
@@ -476,6 +503,15 @@
       const time = document.createElement('time');
       time.className = 'hidden';
       meta.append(time);
+      // "Reply" appears together with the time when the bubble is tapped
+      let replyBtn;
+      if (extra?.id) {
+        replyBtn = document.createElement('button');
+        replyBtn.type = 'button'; replyBtn.className = 'reply-btn hidden'; replyBtn.textContent = 'Reply';
+        const snip = msg || (media ? { image: 'Photo', video: 'Video', audio: 'Voice note' }[media.kind] || 'Media' : '');
+        replyBtn.onclick = () => setReply({ id: extra.id, name: sender, snip: snip.slice(0, 100) });
+        meta.append(replyBtn);
+      }
       if (mine) {
         const slot = document.createElement('span');
         slot.className = 'tick-slot flex items-center';
@@ -489,6 +525,7 @@
         if (!time.textContent) return;
         const show = time.classList.toggle('hidden') === false;
         bubble.setAttribute('aria-expanded', String(show));
+        replyBtn?.classList.toggle('hidden', !show);
         if (!mine) meta.classList.toggle('hidden', !show);
       };
       // Taps on a photo open it, taps on audio/video controls play them: only the bubble's own padding or text toggles the time
@@ -713,7 +750,7 @@
     });
 
     // "Sending..." only if the ack is slow; on failure keep the text and offer retry. Same id on retry = no duplicate.
-    function deliver(col, text, id, up) {
+    function deliver(col, text, id, up, replyTo) {
       let status = col.querySelector('.status');
       if (status) status.remove();
       status = document.createElement('div');
@@ -729,13 +766,13 @@
         retry.type = 'button';
         retry.className = 'retry text-sm';
         retry.textContent = 'Not sent. Tap to retry';
-        retry.onclick = () => deliver(col, text, id, up);
+        retry.onclick = () => deliver(col, text, id, up, replyTo);
         status.appendChild(retry);
       };
       const send = () => {
         // socket.io buffers the emit while offline and sends it on reconnect; timeout drops it from the buffer
         const media = up && { path: up.path, kind: up.kind, mime: up.mime, secs: up.secs };
-        socket.timeout(10000).emit('chat message', { id, msg: text, media }, (err, res) => {
+        socket.timeout(10000).emit('chat message', { id, msg: text, media, replyTo: replyTo?.id },(err, res) => {
           if (!err && res?.ok) { clearTimeout(slow); status.remove(); delete col.parentElement.dataset.pending; stamp(col, res.ts); return; }
           fail();
         });
@@ -768,13 +805,31 @@
     // Show the bubble at once from the local file, then upload in the background
     function sendMedia(blob, kind, mime, secs) {
       const url = URL.createObjectURL(blob);
-      deliver(displayMessage(name, '', null, { url, kind, secs }), '', crypto.randomUUID(), { blob, kind, mime, secs });
+      const id = crypto.randomUUID(), r = replying;
+      deliver(displayMessage(name, '', null, { url, kind, secs }, { id, replyTo: r }), '', id, { blob, kind, mime, secs }, r);
+      clearReply();
     }
 
+    // ---------- Replying: the bar above the composer shows what the next message answers ----------
+    let replying = null;
+    function setReply(r) {
+      replying = r;
+      document.getElementById('replyName').textContent = r.name;
+      document.getElementById('replySnip').textContent = r.snip;
+      replyBar.classList.remove('hidden');
+      input.focus();
+    }
+    function clearReply() { replying = null; replyBar.classList.add('hidden'); }
+    const replyBar = document.getElementById('replyBar');
+    document.getElementById('replyCancel').onclick = () => { clearReply(); input.focus(); };
+
     attachBtn.onclick = () => mediaFile.click();
+    // Several files may be picked at once: each goes out as its own message, in order
     mediaFile.onchange = async () => {
-      const f = mediaFile.files[0]; mediaFile.value = '';
-      if (!f) return;
+      const files = [...mediaFile.files]; mediaFile.value = '';
+      for (const f of files) await sendFile(f);
+    };
+    async function sendFile(f) {
       try {
         if (f.type.startsWith('video/')) {
           if (!['video/mp4', 'video/webm', 'video/quicktime'].includes(f.type)) return showFormMsg('That video type is not supported. Try an MP4.');
@@ -791,7 +846,7 @@
         const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.82));
         sendMedia(blob, 'image', 'image/jpeg', null);
       } catch { showFormMsg('Could not open that file.'); }
-    };
+    }
     document.getElementById('viewerClose').onclick = () => viewer.close();
     viewer.addEventListener('click', e => { if (e.target === viewer) viewer.close(); });
 
@@ -836,7 +891,9 @@
       e.preventDefault();
       const text = input.value.trim();
       if (!text) return;
-      deliver(displayMessage(name, text), text, crypto.randomUUID());
+      const id = crypto.randomUUID(), r = replying;
+      deliver(displayMessage(name, text, null, undefined, { id, replyTo: r }), text, id, undefined, r);
+      clearReply();
       input.value = ""; sendTyping(false);
       sendBtn.classList.add('hidden'); micBtn.classList.remove('hidden');
       charCount.classList.add('hidden');
@@ -957,7 +1014,7 @@
         let marked = false;
         history.forEach(m => {
           if (!marked && myLastReadAt && m.name !== name && new Date(m.ts) > new Date(myLastReadAt)) { addDivider(); marked = true; }
-          displayMessage(m.name, m.msg, m.ts, m.media);
+          displayMessage(m.name, m.msg, m.ts, m.media, { id: m.id, replyTo: m.replyTo });
         });
         pending.forEach(p => messages.appendChild(p));
         scrollToFresh();
@@ -968,7 +1025,7 @@
       // System notifications come from Web Push (service worker); here only the unread count in the tab title
       socket.on('chat message', data => {
         if (typingName === data.name) { typingName = null; renderPresence(); }
-        displayMessage(data.name, data.msg, data.ts, data.media);
+        displayMessage(data.name, data.msg, data.ts, data.media, { id: data.id, replyTo: data.replyTo });
         markDelivered();
         if (document.hidden) { unread++; document.title = `(${unread}) ${baseTitle}`; }
         else markRead();

@@ -3,7 +3,7 @@ const http = require('http');
 const { Server } = require('socket.io');
 const { createClient } = require('@supabase/supabase-js');
 const webpush = require('web-push');
-const { randomUUID } = require('crypto');
+const { createMedia } = require('./media');
 
 const {
   SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, SUPABASE_SERVICE_ROLE_KEY,
@@ -59,51 +59,46 @@ async function notificationsEnabled(userId) {
   return data ? data.notifications_enabled : true; // default on until the account says otherwise
 }
 
-// Photos, videos and voice notes live in the private "media" bucket (<roomId>/<uuid>.<ext>). The browser uploads
-// straight to Storage with a one-time signed URL from here; everyone reads through short-lived signed URLs.
-const MEDIA_MIMES = {
-  image: { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' },
-  video: { 'video/mp4': 'mp4', 'video/webm': 'webm', 'video/quicktime': 'mov' },
-  audio: { 'audio/webm': 'webm', 'audio/mp4': 'm4a', 'audio/ogg': 'ogg', 'audio/mpeg': 'mp3' }
-};
-const MEDIA_MAX = 25 * 1024 * 1024;   // matches the bucket's file size limit
-const MEDIA_LABEL = { image: '📷 Photo', video: '🎬 Video', audio: '🎤 Voice note' };
-const SIGNED_SECONDS = 3600;          // ponytail: a tab left open > 1 h needs a reload to replay old media
-
-// Supabase free plan = 1 GB of files. When this Room's media would pass 85% of the quota, delete the OLDEST files
-// until it is back under 70% (so we don't delete on every upload). The messages stay; their media is replaced by a note.
-// ponytail: counts only this Room's folder (the app has one Room); sum all folders if more Rooms ever share the bucket.
-const MEDIA_QUOTA = Number(process.env.MEDIA_QUOTA_BYTES) || 1024 ** 3;
-const MEDIA_HIGH = 0.85, MEDIA_LOW = 0.70;
-async function trimMedia(roomId, incoming = 0) {
-  const bucket = db.storage.from('media');
-  const { data, error } = await bucket.list(roomId, { limit: 1000, sortBy: { column: 'created_at', order: 'asc' } });
-  if (error) return console.error('storage list failed', error.message);
-  let used = data.reduce((n, f) => n + (f.metadata?.size || 0), 0);
-  if (used + incoming <= MEDIA_QUOTA * MEDIA_HIGH) return;
-  const gone = [];
-  for (const f of data) {                       // oldest first
-    if (used + incoming <= MEDIA_QUOTA * MEDIA_LOW) break;
-    gone.push(`${roomId}/${f.name}`); used -= f.metadata?.size || 0;
+// Photos, videos and voice notes: the rules live in media.js; this wires it to Supabase Storage and the messages table.
+const bucket = db.storage.from('media');
+const media = createMedia({
+  quota: Number(process.env.MEDIA_QUOTA_BYTES) || undefined,
+  storage: {
+    async list(roomId) {
+      const { data, error } = await bucket.list(roomId, { limit: 1000, sortBy: { column: 'created_at', order: 'asc' } });
+      if (error) throw error;
+      return data.map(f => ({ name: f.name, size: f.metadata?.size || 0 }));
+    },
+    async remove(paths) { const { error } = await bucket.remove(paths); if (error) throw error; },
+    async createUploadToken(path) { const { data, error } = await bucket.createSignedUploadUrl(path); if (error) throw error; return data.token; },
+    async signedUrls(paths, secs) {
+      const { data } = await bucket.createSignedUrls(paths, secs);
+      return Object.fromEntries((data || []).filter(d => d.signedUrl).map(d => [d.path, d.signedUrl]));
+    }
+  },
+  async forgetPaths(gone) {
+    await db.from('messages').update({ body: '(photo/video/voice note removed to free space)' }).in('media_path', gone).eq('body', '');
+    await db.from('messages').update({ media_path: null, media_kind: null, media_mime: null, media_secs: null }).in('media_path', gone);
   }
-  if (!gone.length) return;
-  const { error: rmErr } = await bucket.remove(gone);
-  if (rmErr) return console.error('storage delete failed', rmErr.message);
-  await db.from('messages').update({ body: '(photo/video/voice note removed to free space)' }).in('media_path', gone).eq('body', '');
-  await db.from('messages').update({ media_path: null, media_kind: null, media_mime: null, media_secs: null }).in('media_path', gone);
-  console.log(`media over ${MEDIA_HIGH * 100}% of quota: removed ${gone.length} oldest file(s)`);
+});
+
+// The messages being replied to, as { id, name, snip } keyed by id (snip = short text, or "Photo" etc. for media)
+async function quotes(rows) {
+  const ids = [...new Set(rows.map(r => r.reply_to).filter(Boolean))];
+  if (!ids.length) return {};
+  const { data } = await db.from('messages').select('id, body, sender_id, media_kind').in('id', ids);
+  const { data: ms } = await db.from('members').select('user_id, display_name').in('user_id', [...new Set((data || []).map(q => q.sender_id))]);
+  const who = Object.fromEntries((ms || []).map(m => [m.user_id, m.display_name]));
+  return Object.fromEntries((data || []).map(q =>
+    [q.id, { id: q.id, name: who[q.sender_id] || 'Unknown', snip: (q.body || media.label(q.media_kind)).slice(0, 100) }]));
 }
 
 // rows from the messages table -> what the browser gets (with signed URLs for any media)
 async function toClient(rows, names) {
-  const paths = rows.map(r => r.media_path).filter(Boolean);
-  const urls = {};
-  if (paths.length) {
-    const { data } = await db.storage.from('media').createSignedUrls(paths, SIGNED_SECONDS);
-    (data || []).forEach(d => { if (d.signedUrl) urls[d.path] = d.signedUrl; });
-  }
+  const urls = await media.sign(rows.map(r => r.media_path).filter(Boolean));
+  const quoted = await quotes(rows);
   return rows.map(r => ({
-    id: r.id, name: names[r.sender_id] || 'Unknown', msg: r.body, ts: r.created_at,
+    id: r.id, name: names[r.sender_id] || 'Unknown', msg: r.body, ts: r.created_at, replyTo: quoted[r.reply_to],
     media: r.media_path ? { url: urls[r.media_path] || null, kind: r.media_kind, secs: r.media_secs } : undefined
   }));
 }
@@ -115,7 +110,7 @@ async function pushToOthers({ userId, roomId, name }, body) {
     const { data: subs } = await db.from('push_subscriptions').select('*').eq('user_id', user_id);
     const payload = JSON.stringify({ title: name, body });
     for (const s of subs || []) {
-      webpush.sendNotification({ endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } }, payload)
+      webpush.sendNotification({ endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } }, payload, { urgency: 'high', TTL: 3600 })
         .catch(async err => {
           // 404/410 = the browser dropped this subscription; forget it
           if (err.statusCode === 404 || err.statusCode === 410) await db.from('push_subscriptions').delete().eq('endpoint', s.endpoint);
@@ -149,33 +144,30 @@ io.on('connection', socket => {
   // Last arg is the ack callback: confirms the message is stored
   // The browser asks for permission to upload one file; we check type/size and hand back a one-time upload token.
   socket.on('media:upload', async (d, ack) => {
-    const ext = MEDIA_MIMES[d?.kind]?.[d?.mime];
-    if (!ext || !(d.size > 0 && d.size <= MEDIA_MAX)) return ack?.({ ok: false, reason: 'type or size' });
-    await trimMedia(roomId, d.size);
-    const path = `${roomId}/${randomUUID()}.${ext}`;
-    const { data, error } = await db.storage.from('media').createSignedUploadUrl(path);
-    if (error) { console.error('upload url failed', error.message); return ack?.({ ok: false }); }
-    ack?.({ ok: true, path, token: data.token });
+    ack?.(await media.authorizeUpload(roomId, d || {}));
   });
 
   // Last arg is the ack callback: confirms the message is stored. A message is text, media (optionally with text), or both.
   socket.on('chat message', async (data, ack) => {
     const id = data?.id, msg = typeof data?.msg === 'string' ? data.msg.trim().slice(0, 2000) : '';
-    const m = data?.media;
-    // media must be one of this Room's own uploads (path begins with the Room id; the uuid+ext part is fixed-shape)
-    const media = m && MEDIA_MIMES[m.kind]?.[m.mime] && new RegExp(`^${roomId}/[0-9a-f-]{36}\\.[a-z0-9]{2,4}$`).test(m.path)
-      ? { path: m.path, kind: m.kind, mime: m.mime, secs: Number.isFinite(m.secs) ? Math.min(Math.round(m.secs), 3600) : null } : null;
-    if (!id || (!msg && !media) || (m && !media)) return ack?.({ ok: false });
+    const m = data?.media, att = m && media.attach(roomId, m);
+    if (!id || (!msg && !att) || (m && !att)) return ack?.({ ok: false });
     const ts = new Date().toISOString();
+    // a reply must point at a message in this Room, otherwise it is sent as a plain message
+    let reply_to = typeof data.replyTo === 'string' ? data.replyTo : null;
+    if (reply_to) {
+      const { data: q } = await db.from('messages').select('id').eq('id', reply_to).eq('room_id', roomId).maybeSingle();
+      if (!q) reply_to = null;
+    }
     // upsert + ignoreDuplicates: a retried send with the same id is a no-op, never a duplicate
-    const row = { id, room_id: roomId, sender_id: userId, body: msg, created_at: ts,
-      media_path: media?.path ?? null, media_kind: media?.kind ?? null, media_mime: media?.mime ?? null, media_secs: media?.secs ?? null };
+    const row = { id, room_id: roomId, sender_id: userId, body: msg, created_at: ts, reply_to,
+      media_path: att?.path ?? null, media_kind: att?.kind ?? null, media_mime: att?.mime ?? null, media_secs: att?.secs ?? null };
     const { error } = await db.from('messages').upsert(row, { onConflict: 'id', ignoreDuplicates: true });
     if (error) { console.error('save failed', error.message); return ack?.({ ok: false }); }
     const [out] = await toClient([row], { [userId]: name });
     socket.to(roomId).emit('chat message', out);
     ack?.({ ok: true, ts });
-    pushToOthers(socket.data, msg || MEDIA_LABEL[media.kind]);
+    pushToOthers(socket.data, msg || media.label(att.kind));
   });
 
   // "I have the chat open and can see it": drives the other Member's read receipts and my own unread marker.
@@ -234,7 +226,7 @@ io.on('connection', socket => {
   (async () => {
     const [settingOn, { data: rows }, { data: members }, { data: room }] = await Promise.all([
       notificationsEnabled(userId),
-      db.from('messages').select('id, body, created_at, sender_id, media_path, media_kind, media_secs').eq('room_id', roomId)
+      db.from('messages').select('id, body, created_at, sender_id, reply_to, media_path, media_kind, media_secs').eq('room_id', roomId)
         .order('created_at', { ascending: false }).limit(MAX_HISTORY),
       db.from('members').select('user_id, display_name, last_read_at, delivered_at').eq('room_id', roomId),
       db.from('account_settings').select('wallpaper').eq('user_id', userId).maybeSingle()
